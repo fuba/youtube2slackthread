@@ -14,6 +14,8 @@ from .stream_processor import StreamProcessor
 from .vad_stream_processor import VADStreamProcessor
 from .whisper_transcriber import WhisperTranscriber
 from .slack_client import SlackClient
+from .slack_bot_client import SlackBotClient, ThreadInfo, SlackBotError
+from .slack_server import SlackServer, create_slack_server
 
 
 def setup_logging(verbose: bool = False, log_file: Optional[str] = None) -> None:
@@ -501,6 +503,156 @@ def vad_stream(ctx, stream_url: str, vad_aggressiveness: int, frame_duration: in
 
 
 @cli.command()
+@click.argument('url')
+@click.option('--channel', '-c', help='Slack channel (e.g., #general)')
+@click.option('--whisper-model', '-m', default='medium', help='Whisper model size')
+@click.option('--language', '-l', help='Language code (auto-detect if not specified)')
+@click.option('--include-timestamps', is_flag=True, help='Include timestamps in transcription')
+@click.pass_context
+def thread(ctx, url: str, channel: Optional[str], whisper_model: str,
+          language: Optional[str], include_timestamps: bool):
+    """Process a YouTube video and post to a Slack thread using Bot API."""
+    
+    # Check required environment variables
+    bot_token = os.environ.get('SLACK_BOT_TOKEN')
+    if not bot_token:
+        click.echo("Error: SLACK_BOT_TOKEN environment variable is required", err=True)
+        click.echo("Get this from your Slack app's OAuth & Permissions page", err=True)
+        sys.exit(1)
+    
+    config: WorkflowConfig = ctx.obj['config']
+    
+    # Override config with CLI options
+    if whisper_model != 'base':
+        config.whisper_model = whisper_model
+    if language:
+        config.whisper_language = language
+    if include_timestamps:
+        config.include_timestamps = include_timestamps
+    
+    try:
+        # Create bot client
+        bot_client = SlackBotClient(bot_token=bot_token)
+        
+        # Get channel ID
+        target_channel = channel or config.slack_channel
+        if not target_channel:
+            click.echo("Error: Channel is required. Use --channel or set in config", err=True)
+            sys.exit(1)
+        
+        if not target_channel.startswith('#'):
+            target_channel = f"#{target_channel}"
+        
+        channel_id = bot_client.get_channel_id(target_channel.lstrip('#'))
+        if not channel_id:
+            click.echo(f"Error: Channel {target_channel} not found", err=True)
+            sys.exit(1)
+        
+        # Create workflow
+        workflow = YouTube2SlackWorkflow(config)
+        
+        click.echo(f"🚀 Processing video: {url}")
+        
+        # Get video info
+        video_info = workflow.downloader.get_info(url)
+        video_title = video_info['title']
+        duration = video_info.get('duration', 0)
+        
+        click.echo(f"📺 Title: {video_title}")
+        
+        # Create thread
+        thread_info = bot_client.create_thread(
+            channel=channel_id,
+            video_title=video_title,
+            video_url=url,
+            duration=duration
+        )
+        
+        click.echo(f"🧵 Created thread in {target_channel}")
+        
+        # Post processing status
+        bot_client.post_to_thread(thread_info, "🔄 *Processing video...*")
+        
+        with click.progressbar(length=100, label='Processing video') as bar:
+            def progress_callback(message: str):
+                click.echo(f"  {message}")
+                bot_client.post_to_thread(thread_info, f"⏳ {message}")
+            
+            result = workflow.process_video(url, progress_callback)
+            bar.update(100)
+        
+        if result.success:
+            # Post transcription to thread
+            click.echo("📝 Posting transcription to thread...")
+            bot_client.post_transcription_to_thread(
+                thread_info,
+                result.transcription_text,
+                include_timestamps=config.include_timestamps
+            )
+            
+            # Final status
+            bot_client.post_to_thread(
+                thread_info, 
+                f"✅ *Processing complete!* Language detected: {result.language}"
+            )
+            
+            click.echo(f"✅ Successfully processed and posted to thread!")
+            
+        else:
+            # Post error to thread
+            bot_client.post_error_to_thread(
+                thread_info,
+                result.error or "Unknown error occurred"
+            )
+            
+            click.echo(f"❌ Processing failed: {result.error}")
+            sys.exit(1)
+            
+    except SlackBotError as e:
+        click.echo(f"❌ Slack error: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"❌ Error: {e}", err=True)
+        sys.exit(1)
+
+
+@cli.command()
+@click.option('--port', '-p', default=3000, help='Server port')
+@click.option('--debug', is_flag=True, help='Enable debug mode')
+@click.pass_context
+def serve(ctx, port: int, debug: bool):
+    """Start Slack server for handling slash commands."""
+    
+    # Check required environment variables
+    required_env_vars = ['SLACK_BOT_TOKEN', 'SLACK_SIGNING_SECRET']
+    missing_vars = [var for var in required_env_vars if not os.environ.get(var)]
+    
+    if missing_vars:
+        click.echo("Error: Missing required environment variables:", err=True)
+        for var in missing_vars:
+            click.echo(f"  - {var}", err=True)
+        click.echo("\nPlease set these in your environment.", err=True)
+        sys.exit(1)
+    
+    try:
+        config: WorkflowConfig = ctx.obj['config']
+        
+        # Create server
+        server = create_slack_server(port=port)
+        
+        click.echo(f"🚀 Starting Slack server on port {port}")
+        click.echo(f"📡 Webhook URL: http://localhost:{port}/slack/commands")
+        click.echo("👀 Configure your Slack app to use this URL for slash commands")
+        
+        # Run server
+        server.run(debug=debug)
+        
+    except Exception as e:
+        click.echo(f"❌ Failed to start server: {e}", err=True)
+        sys.exit(1)
+
+
+@cli.command()
 def create_config():
     """Create a sample configuration file."""
     
@@ -517,10 +669,18 @@ whisper:
   language: null                     # Language code (en, ja, etc. or null for auto-detect)
 
 slack:
+  # For webhook mode (legacy)
   webhook_url: "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
   channel: null                      # Optional channel override (e.g., "#transcripts")
   include_timestamps: false          # Include timestamps in transcription
   send_errors_to_slack: true         # Send error notifications to Slack
+
+# For Bot API mode (new thread functionality)
+# Set these as environment variables:
+# SLACK_BOT_TOKEN=xoxb-your-bot-token
+# SLACK_APP_TOKEN=xapp-your-app-token (optional, for socket mode)
+# SLACK_SIGNING_SECRET=your-signing-secret
+# SLACK_DEFAULT_CHANNEL=general (optional)
 '''
     
     config_path = 'config.yaml'
@@ -533,7 +693,7 @@ slack:
         f.write(config_content)
     
     click.echo(f"✓ Created config file: {config_path}")
-    click.echo("Please edit the file to set your Slack webhook URL and other preferences.")
+    click.echo("Please edit the file and set environment variables for Slack Bot API.")
 
 
 def main():

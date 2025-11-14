@@ -26,6 +26,7 @@ dependencies = [
     "pytest-cov>=5.0.0",
     "webrtcvad>=2.0.10",
     "setuptools>=75.3.2",
+    "flask>=2.3.0",
 ]
 
 [project.optional-dependencies]
