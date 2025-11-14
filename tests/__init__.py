@@ -1,0 +1,1 @@
+"""Tests for youtube2slack package."""

@@ -1,0 +1,71 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "youtube2slack"
+version = "0.1.0"
+description = "Download YouTube videos, transcribe with Whisper, and post to Slack"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "CC0"}
+authors = [
+    {name = "YouTube2Slack Contributors"},
+]
+dependencies = [
+    "yt-dlp>=2023.12.30",
+    "openai-whisper>=20231117",
+    "slack-sdk>=3.26.0",
+    "click>=8.1.7",
+    "pyyaml>=6.0.1",
+    "requests>=2.31.0",
+    "tqdm>=4.66.1",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.3",
+    "pytest-asyncio>=0.21.1",
+    "pytest-cov>=4.1.0",
+    "black>=23.11.0",
+    "flake8>=6.1.0",
+    "mypy>=1.7.1",
+    "pre-commit>=3.5.0",
+]
+
+[project.scripts]
+youtube2slack = "youtube2slack.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+youtube2slack = ["py.typed"]
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_any_generics = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+
+[tool.black]
+line-length = 100
+target-version = ['py38']
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q --strict-markers"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
