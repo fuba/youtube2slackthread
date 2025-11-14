@@ -617,7 +617,7 @@ def thread(ctx, url: str, channel: Optional[str], whisper_model: str,
 
 
 @cli.command()
-@click.option('--port', '-p', default=3000, help='Server port')
+@click.option('--port', '-p', default=42389, help='Server port')
 @click.option('--debug', is_flag=True, help='Enable debug mode')
 @click.pass_context
 def serve(ctx, port: int, debug: bool):
@@ -637,8 +637,30 @@ def serve(ctx, port: int, debug: bool):
     try:
         config: WorkflowConfig = ctx.obj['config']
         
-        # Create server
-        server = create_slack_server(port=port)
+        # Create server with config from CLI context
+        from .slack_server import SlackServer
+        from .slack_bot_client import SlackBotClient
+        
+        # Get Slack configuration from environment
+        bot_token = os.environ.get('SLACK_BOT_TOKEN')
+        app_token = os.environ.get('SLACK_APP_TOKEN')
+        signing_secret = os.environ.get('SLACK_SIGNING_SECRET')
+        default_channel = os.environ.get('SLACK_DEFAULT_CHANNEL')
+        
+        # Create bot client
+        bot_client = SlackBotClient(
+            bot_token=bot_token,
+            app_token=app_token,
+            default_channel=default_channel
+        )
+        
+        # Create server with our config
+        server = SlackServer(
+            bot_client=bot_client,
+            workflow_config=config,
+            signing_secret=signing_secret,
+            port=port
+        )
         
         click.echo(f"🚀 Starting Slack server on port {port}")
         click.echo(f"📡 Webhook URL: http://localhost:{port}/slack/commands")

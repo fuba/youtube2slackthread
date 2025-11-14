@@ -98,6 +98,7 @@ class VADStreamProcessor:
             raise VADStreamProcessingError("Stream processing already running")
             
         self.is_running = True
+        self.progress_callback = progress_callback  # Store callback for _post_sentence_to_slack
         self.stream_info = self._get_stream_info(stream_url)
         
         logger.info(f"Starting VAD-based processing of: {self.stream_info.get('title', 'Unknown Stream')}")
@@ -112,8 +113,9 @@ class VADStreamProcessor:
             except Exception as e:
                 logger.error(f"Failed to post initial message: {e}")
         
-        if progress_callback:
-            progress_callback(f"Starting VAD stream: {self.stream_info.get('title', 'Unknown')}")
+        # Removed: Don't send initial setup messages to Slack
+        # if progress_callback:
+        #     progress_callback(f"Starting VAD stream: {self.stream_info.get('title', 'Unknown')}")
         
         # Start background thread for processing audio segments
         self.processing_thread = threading.Thread(
@@ -182,8 +184,9 @@ class VADStreamProcessor:
             logger.info("Starting continuous FFmpeg audio stream...")
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             
-            if progress_callback:
-                progress_callback("Processing continuous audio stream with VAD...")
+            # Removed: Don't send initial processing message to Slack
+            # if progress_callback:
+            #     progress_callback("Processing continuous audio stream with VAD...")
             
             # Read audio data continuously
             self._process_continuous_audio_stream(process, progress_callback)
@@ -346,8 +349,9 @@ class VADStreamProcessor:
             logger.info(f"Queued speech segment {segment_index} "
                        f"(duration: {segment_info['duration']:.2f}s)")
             
-            if progress_callback:
-                progress_callback(f"Processing speech segment {segment_index + 1}")
+            # Removed: Don't send processing progress to Slack
+            # if progress_callback:
+            #     progress_callback(f"Processing speech segment {segment_index + 1}")
                 
         except Exception as e:
             logger.error(f"Failed to save speech segment: {e}")
@@ -444,6 +448,10 @@ class VADStreamProcessor:
     def _post_sentence_to_slack(self, sentence: str) -> None:
         """Post a complete sentence to Slack."""
         if not self.slack_client:
+            # Use progress callback if no slack_client
+            if hasattr(self, 'progress_callback') and self.progress_callback:
+                logger.info(f"Posting sentence via callback: {sentence[:50]}...")
+                self.progress_callback(sentence)
             return
             
         try:

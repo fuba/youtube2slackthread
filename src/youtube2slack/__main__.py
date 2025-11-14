@@ -34,7 +34,7 @@ def setup_production_logging():
 
 def get_port() -> int:
     """Get port from environment or default."""
-    return int(os.environ.get('PORT', '3000'))
+    return int(os.environ.get('PORT', '42389'))
 
 
 def get_config_path() -> Optional[str]:
