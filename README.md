@@ -44,7 +44,7 @@ youtube:
   keep_video: true
 
 whisper:
-  model: "base"  # tiny, base, small, medium, large
+  model: "medium"  # tiny, base, small, medium, large
   device: null  # cpu, cuda, or null for auto
   language: null  # auto-detect or specify (en, ja, etc.)
 
@@ -82,7 +82,7 @@ youtube2slack vad-stream https://www.youtube.com/live/STREAM_ID
 youtube2slack vad-stream https://www.youtube.com/live/STREAM_ID \
   --vad-aggressiveness 2 \
   --frame-duration 30 \
-  --whisper-model small
+  --whisper-model large
 
 # With custom Slack webhook
 youtube2slack vad-stream https://www.youtube.com/live/STREAM_ID \
