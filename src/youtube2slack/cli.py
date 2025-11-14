@@ -340,14 +340,10 @@ def info(url: str):
 @click.option('--language', '-l', help='Language code (auto-detect if not specified)')
 @click.option('--slack-webhook', help='Slack webhook URL')
 @click.option('--slack-channel', help='Slack channel override')
-@click.option('--enable-scene-detection', is_flag=True, default=True, help='Enable scene change detection')
-@click.option('--scene-diff-threshold', default=0.3, help='Scene detection difference threshold (0-1)')
-@click.option('--scene-hist-threshold', default=0.7, help='Scene detection histogram threshold (0-1)')
 @click.pass_context
 def stream(ctx, stream_url: str, chunk_duration: int, overlap: int,
           whisper_model: str, language: Optional[str],
-          slack_webhook: Optional[str], slack_channel: Optional[str],
-          enable_scene_detection: bool, scene_diff_threshold: float, scene_hist_threshold: float):
+          slack_webhook: Optional[str], slack_channel: Optional[str]):
     """Process a live YouTube stream in real-time chunks."""
     
     config: WorkflowConfig = ctx.obj['config']
@@ -385,10 +381,7 @@ def stream(ctx, stream_url: str, chunk_duration: int, overlap: int,
         transcriber=transcriber,
         slack_client=slack_client,
         chunk_duration=chunk_duration,
-        overlap_duration=overlap,
-        enable_scene_detection=enable_scene_detection,
-        scene_diff_threshold=scene_diff_threshold,
-        scene_hist_threshold=scene_hist_threshold
+        overlap_duration=overlap
     )
     
     def progress_callback(message: str):
@@ -397,10 +390,6 @@ def stream(ctx, stream_url: str, chunk_duration: int, overlap: int,
     try:
         click.echo(f"🔴 Starting live stream processing...")
         click.echo(f"⏱️  Chunk duration: {chunk_duration}s (overlap: {overlap}s)")
-        if enable_scene_detection:
-            click.echo(f"🎬 Scene detection enabled (diff: {scene_diff_threshold}, hist: {scene_hist_threshold})")
-        else:
-            click.echo(f"🎬 Scene detection disabled")
         click.echo("Press Ctrl+C to stop processing")
         
         # Start processing
@@ -431,14 +420,10 @@ def stream(ctx, stream_url: str, chunk_duration: int, overlap: int,
 @click.option('--language', '-l', help='Language code (auto-detect if not specified)')
 @click.option('--slack-webhook', help='Slack webhook URL')
 @click.option('--slack-channel', help='Slack channel override')
-@click.option('--enable-scene-detection', is_flag=True, default=True, help='Enable scene change detection')
-@click.option('--scene-diff-threshold', default=0.3, help='Scene detection difference threshold (0-1)')
-@click.option('--scene-hist-threshold', default=0.7, help='Scene detection histogram threshold (0-1)')
 @click.pass_context
 def vad_stream(ctx, stream_url: str, vad_aggressiveness: int, frame_duration: int,
                whisper_model: str, language: Optional[str],
-               slack_webhook: Optional[str], slack_channel: Optional[str],
-               enable_scene_detection: bool, scene_diff_threshold: float, scene_hist_threshold: float):
+               slack_webhook: Optional[str], slack_channel: Optional[str]):
     """Process a live YouTube stream with Voice Activity Detection and sentence boundary detection."""
     
     config: WorkflowConfig = ctx.obj['config']
@@ -485,10 +470,7 @@ def vad_stream(ctx, stream_url: str, vad_aggressiveness: int, frame_duration: in
         transcriber=transcriber,
         slack_client=slack_client,
         vad_aggressiveness=vad_aggressiveness,
-        frame_duration_ms=frame_duration,
-        enable_scene_detection=enable_scene_detection,
-        scene_diff_threshold=scene_diff_threshold,
-        scene_hist_threshold=scene_hist_threshold
+        frame_duration_ms=frame_duration
     )
     
     def progress_callback(message: str):
@@ -498,10 +480,6 @@ def vad_stream(ctx, stream_url: str, vad_aggressiveness: int, frame_duration: in
         click.echo(f"🔴 Starting VAD-based stream processing...")
         click.echo(f"🎤 VAD aggressiveness: {vad_aggressiveness} | Frame: {frame_duration}ms")
         click.echo(f"📝 Processing speech segments with sentence boundary detection")
-        if enable_scene_detection:
-            click.echo(f"🎬 Scene detection enabled (diff: {scene_diff_threshold}, hist: {scene_hist_threshold})")
-        else:
-            click.echo(f"🎬 Scene detection disabled")
         click.echo("Press Ctrl+C to stop processing")
         
         # Start processing

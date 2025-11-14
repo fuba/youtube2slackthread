@@ -12,7 +12,6 @@ import re
 from pathlib import Path
 from typing import Dict, Optional, Any, Callable, List
 import logging
-import cv2
 
 try:
     import webrtcvad
@@ -23,7 +22,6 @@ except ImportError:
 
 from .whisper_transcriber import WhisperTranscriber, TranscriptionError
 from .slack_client import SlackClient, SlackError
-from .scene_detector import SceneChangeDetector, StreamSceneCapture
 
 
 logger = logging.getLogger(__name__)
@@ -38,10 +36,7 @@ class VADStreamProcessor:
     """Process live YouTube streams with Voice Activity Detection."""
 
     def __init__(self, transcriber: WhisperTranscriber, slack_client: Optional[SlackClient] = None,
-                 vad_aggressiveness: int = 2, frame_duration_ms: int = 30,
-                 enable_scene_detection: bool = True,
-                 scene_diff_threshold: float = 0.3,
-                 scene_hist_threshold: float = 0.7):
+                 vad_aggressiveness: int = 2, frame_duration_ms: int = 30):
         """Initialize VAD stream processor.
         
         Args:
@@ -49,15 +44,11 @@ class VADStreamProcessor:
             slack_client: Optional SlackClient for posting results
             vad_aggressiveness: VAD aggressiveness level (0-3, higher = more strict)
             frame_duration_ms: Frame duration for VAD analysis (10, 20, or 30 ms)
-            enable_scene_detection: Whether to enable scene change detection
-            scene_diff_threshold: Threshold for pixel difference in scene detection
-            scene_hist_threshold: Threshold for histogram similarity in scene detection
         """
         self.transcriber = transcriber
         self.slack_client = slack_client
         self.vad_aggressiveness = vad_aggressiveness
         self.frame_duration_ms = frame_duration_ms
-        self.enable_scene_detection = enable_scene_detection
         
         # Initialize VAD
         if VAD_AVAILABLE:
@@ -70,7 +61,6 @@ class VADStreamProcessor:
         self.is_running = False
         self.audio_queue = queue.Queue()
         self.processing_thread = None
-        self.scene_processing_thread = None
         self.stream_info = {}
         
         # Audio buffering for VAD processing
@@ -91,24 +81,8 @@ class VADStreamProcessor:
         self.frame_size = int(self.sample_rate * self.frame_duration_ms / 1000)
         self.bytes_per_frame = self.frame_size * 2  # 16-bit audio
         
-        # Temporary directory for audio chunks and scene images
+        # Temporary directory for audio chunks
         self.temp_dir = tempfile.mkdtemp(prefix="youtube2slack_vad_")
-        
-        # Scene detection setup
-        if self.enable_scene_detection:
-            self.scene_detector = SceneChangeDetector(
-                diff_threshold=scene_diff_threshold,
-                hist_threshold=scene_hist_threshold,
-                check_interval=2.0  # Check every 2 seconds
-            )
-            self.scene_capture = StreamSceneCapture(
-                self.scene_detector, 
-                output_dir=os.path.join(self.temp_dir, "scenes")
-            )
-            logger.info(f"Scene detection enabled with thresholds: diff={scene_diff_threshold}, hist={scene_hist_threshold}")
-        else:
-            self.scene_detector = None
-            self.scene_capture = None
         
         logger.info(f"VAD stream processor initialized")
 
@@ -148,15 +122,6 @@ class VADStreamProcessor:
             daemon=True
         )
         self.processing_thread.start()
-        
-        # Start background thread for scene detection
-        if self.enable_scene_detection and self.slack_client:
-            self.scene_processing_thread = threading.Thread(
-                target=self._process_scene_detection,
-                args=(stream_url, progress_callback),
-                daemon=True
-            )
-            self.scene_processing_thread.start()
         
         # Start continuous audio streaming with VAD
         self._start_vad_stream_capture(stream_url, progress_callback)
@@ -500,81 +465,6 @@ class VADStreamProcessor:
         except Exception as e:
             logger.warning(f"Failed to cleanup segment {segment_path}: {e}")
 
-    def _process_scene_detection(self, stream_url: str, 
-                               progress_callback: Optional[Callable[[str], None]] = None) -> None:
-        """Background worker for scene change detection and image capture.
-        
-        Args:
-            stream_url: Stream URL
-            progress_callback: Progress callback
-        """
-        if not self.enable_scene_detection or not self.scene_detector:
-            return
-        
-        try:
-            # Get the actual stream URL for video processing
-            actual_stream_url = self._get_actual_stream_url(stream_url)
-            if not actual_stream_url:
-                logger.error("Failed to get stream URL for scene detection")
-                return
-            
-            # Open video stream for frame extraction
-            cap = cv2.VideoCapture(actual_stream_url)
-            if not cap.isOpened():
-                logger.error("Failed to open video stream for scene detection")
-                return
-            
-            logger.info("Scene detection started")
-            scene_count = 0
-            frame_count = 0
-            
-            while self.is_running and scene_count < 20:  # Limit to 20 scene changes
-                ret, frame = cap.read()
-                
-                if not ret:
-                    logger.warning("Failed to read video frame, retrying...")
-                    time.sleep(1)
-                    continue
-                
-                frame_count += 1
-                
-                # Check for scene change
-                if self.scene_detector.detect_scene_change(frame):
-                    scene_count += 1
-                    
-                    # Save scene image
-                    scene_dir = os.path.join(self.temp_dir, "scenes")
-                    os.makedirs(scene_dir, exist_ok=True)
-                    scene_path = os.path.join(scene_dir, f"scene_{scene_count:04d}_{int(time.time())}.jpg")
-                    
-                    # Resize frame for efficient storage and transmission
-                    display_frame = cv2.resize(frame, (640, 480))
-                    cv2.imwrite(scene_path, display_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                    
-                    # Send to Slack
-                    if self.slack_client:
-                        stream_title = self.stream_info.get('title', 'Live Stream')
-                        scene_title = f"Scene {scene_count} - {stream_title}"
-                        comment = f"Scene change detected at frame {frame_count}"
-                        
-                        try:
-                            self.slack_client.send_image(scene_path, scene_title, comment)
-                            logger.info(f"Scene {scene_count} sent to Slack: {scene_path}")
-                        except Exception as e:
-                            logger.error(f"Failed to send scene {scene_count} to Slack: {e}")
-                    
-                    if progress_callback:
-                        progress_callback(f"Scene {scene_count} captured and uploaded")
-                
-                # Small delay to avoid overwhelming the system
-                time.sleep(0.1)
-            
-            cap.release()
-            logger.info(f"Scene detection completed: {scene_count} scenes captured")
-            
-        except Exception as e:
-            logger.error(f"Scene detection failed: {e}")
-
     def stop_processing(self) -> None:
         """Stop stream processing."""
         if self.is_running:
@@ -585,12 +475,9 @@ class VADStreamProcessor:
             if self.text_buffer.strip():
                 self._post_sentence_to_slack(self.text_buffer.strip())
             
-            # Wait for processing threads to finish
+            # Wait for processing thread to finish
             if self.processing_thread and self.processing_thread.is_alive():
                 self.processing_thread.join(timeout=10)
-                
-            if self.scene_processing_thread and self.scene_processing_thread.is_alive():
-                self.scene_processing_thread.join(timeout=10)
             
             # Cleanup temporary directory
             self._cleanup_temp_dir()
@@ -609,27 +496,12 @@ class VADStreamProcessor:
 
     def get_status(self) -> Dict[str, Any]:
         """Get current processing status."""
-        status = {
+        return {
             'is_running': self.is_running,
             'stream_info': self.stream_info,
             'pending_segments': self.audio_queue.qsize(),
             'vad_available': VAD_AVAILABLE,
             'is_speaking': self.is_speaking,
             'text_buffer_length': len(self.text_buffer),
-            'temp_dir': self.temp_dir,
-            'scene_detection_enabled': self.enable_scene_detection
+            'temp_dir': self.temp_dir
         }
-        
-        # Add scene detection status if enabled
-        if self.enable_scene_detection and self.scene_detector:
-            status['scene_detector_status'] = self.scene_detector.get_status()
-            
-            # Count captured scenes
-            scene_dir = os.path.join(self.temp_dir, "scenes")
-            if os.path.exists(scene_dir):
-                scene_files = [f for f in os.listdir(scene_dir) if f.endswith('.jpg')]
-                status['captured_scenes'] = len(scene_files)
-            else:
-                status['captured_scenes'] = 0
-        
-        return status
