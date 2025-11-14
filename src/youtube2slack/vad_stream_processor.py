@@ -21,7 +21,6 @@ except ImportError:
     logging.warning("webrtcvad not available, falling back to simple silence detection")
 
 from .whisper_transcriber import WhisperTranscriber, TranscriptionError
-from .slack_client import SlackClient, SlackError
 
 
 logger = logging.getLogger(__name__)
@@ -35,18 +34,16 @@ class VADStreamProcessingError(Exception):
 class VADStreamProcessor:
     """Process live YouTube streams with Voice Activity Detection."""
 
-    def __init__(self, transcriber: WhisperTranscriber, slack_client: Optional[SlackClient] = None,
+    def __init__(self, transcriber: WhisperTranscriber,
                  vad_aggressiveness: int = 2, frame_duration_ms: int = 30):
         """Initialize VAD stream processor.
         
         Args:
             transcriber: WhisperTranscriber instance
-            slack_client: Optional SlackClient for posting results
             vad_aggressiveness: VAD aggressiveness level (0-3, higher = more strict)
             frame_duration_ms: Frame duration for VAD analysis (10, 20, or 30 ms)
         """
         self.transcriber = transcriber
-        self.slack_client = slack_client
         self.vad_aggressiveness = vad_aggressiveness
         self.frame_duration_ms = frame_duration_ms
         
@@ -103,15 +100,7 @@ class VADStreamProcessor:
         
         logger.info(f"Starting VAD-based processing of: {self.stream_info.get('title', 'Unknown Stream')}")
         
-        # Post initial stream title to Slack
-        if self.slack_client:
-            stream_title = self.stream_info.get('title', 'Live Stream')
-            initial_message = f"🔴 {stream_title}\n\n📡 VADベースリアルタイム処理を開始しました"
-            try:
-                self.slack_client.send_message(initial_message)
-                logger.info("Posted stream start message to Slack")
-            except Exception as e:
-                logger.error(f"Failed to post initial message: {e}")
+        # Stream processing started
         
         # Removed: Don't send initial setup messages to Slack
         # if progress_callback:
@@ -446,24 +435,11 @@ class VADStreamProcessor:
                 self.text_buffer = ""
 
     def _post_sentence_to_slack(self, sentence: str) -> None:
-        """Post a complete sentence to Slack."""
-        if not self.slack_client:
-            # Use progress callback if no slack_client
-            if hasattr(self, 'progress_callback') and self.progress_callback:
-                logger.info(f"Posting sentence via callback: {sentence[:50]}...")
-                self.progress_callback(sentence)
-            return
-            
-        try:
-            # Add period if missing
-            if not self.sentence_endings.search(sentence[-1:]):
-                sentence += "。"
-            
-            logger.info(f"Posting sentence to Slack: {sentence[:50]}...")
-            self.slack_client.send_message(sentence)
-            
-        except SlackError as e:
-            logger.error(f"Failed to post sentence to Slack: {e}")
+        """Post a complete sentence via callback."""
+        # Use progress callback
+        if hasattr(self, 'progress_callback') and self.progress_callback:
+            logger.info(f"Posting sentence via callback: {sentence[:50]}...")
+            self.progress_callback(sentence)
 
     def _cleanup_segment(self, segment_path: str) -> None:
         """Clean up processed segment file."""

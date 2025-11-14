@@ -372,8 +372,7 @@ class SlackServer:
             
             # Create VAD processor (existing working implementation)
             vad_processor = VADStreamProcessor(
-                transcriber=transcriber,
-                slack_client=None  # We'll handle Slack posting ourselves
+                transcriber=transcriber
             )
             
             # Create thread first
