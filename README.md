@@ -1,274 +1,168 @@
 # YouTube2SlackThread
 
-Download YouTube videos, transcribe them using local Whisper, and post the transcriptions to Slack **with thread support**.
+Real-time YouTube transcription to Slack threads using Voice Activity Detection and OpenAI Whisper.
 
-## 🆕 New Features
+## Features
 
-- **🧵 Slack Thread Support**: Each video gets its own dedicated thread
-- **⚡ Slash Commands**: Use `/youtube2thread` to process videos from Slack
-- **🤖 Slack Bot API**: Enhanced integration with proper Bot API (replaces webhook-only mode)
-- **📱 Real-time Processing**: Background processing with live status updates in threads
+- **🎯 Real-time transcription** of YouTube videos and live streams
+- **🧵 Slack thread organization** - each video gets its own dedicated thread
+- **⚡ Slash command support** - use `/youtube2thread` in Slack
+- **🎤 Voice Activity Detection (VAD)** - natural sentence boundaries
+- **🚀 CUDA acceleration** - GPU-powered Whisper transcription
+- **🍪 YouTube authentication** - bypass bot detection with browser cookies
 
-## Core Features
+## Quick Start
 
-- Download YouTube videos using yt-dlp
-- Transcribe audio using OpenAI's Whisper (local installation)
-- **🧵 Post transcriptions to Slack threads** (NEW!)
-- **⚡ Slack slash command support** (NEW!)
-- **Real-time live stream processing with VAD (Voice Activity Detection)**
-- **Sentence-boundary detection for natural message splitting**
-- Support for various video formats
-- Progress tracking and logging
-- Configuration file support
-- CLI interface
-
-## Installation
+### 1. Installation
 
 ```bash
-# Clone the repository
-git clone <repository-url>
-cd youtube2slack
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -e .
-
-# For development
-pip install -e ".[dev]"
+git clone https://github.com/your-username/youtube2slackthread.git
+cd youtube2slackthread
+uv pip install -e .
 ```
 
-## Configuration
+### 2. Configuration
 
-### 🆕 Bot API Configuration (Recommended)
-
-For full thread support and slash commands, use Slack Bot API:
-
-1. Create a Slack app at https://api.slack.com/apps
-2. Add Bot Token Scopes: `chat:write`, `channels:read`, `commands`
-3. Install app to your workspace
-4. Set environment variables:
+Create `config.yaml`:
 
 ```bash
-export SLACK_BOT_TOKEN="xoxb-your-bot-token"
-export SLACK_SIGNING_SECRET="your-signing-secret"
-export SLACK_DEFAULT_CHANNEL="general"  # optional
+uv run youtube2slack create-config
 ```
 
-### Configuration File
-
-Create a `config.yaml` file:
+Edit the generated config:
 
 ```yaml
-# YouTube2SlackThread Configuration
 youtube:
-  download_dir: "./downloads"
-  format: "best"
-  keep_video: true
+  cookies_file: "./cookies/youtube_cookies.txt"
 
 whisper:
-  model: "medium"  # tiny, base, small, medium, large
-  device: null  # cpu, cuda, or null for auto
-  language: null  # auto-detect or specify (en, ja, etc.)
+  model: "medium"
+  device: "cuda"  # or "cpu"
 
 slack:
-  # Legacy webhook mode (for backward compatibility)
-  webhook_url: "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
-  channel: null  # optional channel override
-  include_timestamps: false
-  send_errors_to_slack: true
-
-# Bot API configuration is set via environment variables (see above)
+  # Set via environment variables
 ```
+
+### 3. Setup Slack App
+
+1. Create Slack app at https://api.slack.com/apps
+2. Add scopes: `chat:write`, `channels:read`, `commands`
+3. Set environment variables:
+
+```bash
+export SLACK_BOT_TOKEN="xoxb-your-token"
+export SLACK_SIGNING_SECRET="your-secret"
+```
+
+### 4. Setup YouTube Cookies
+
+1. Install browser extension: [Get cookies.txt LOCALLY](https://chrome.google.com/webstore/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc)
+2. Visit YouTube and login
+3. Export cookies to `cookies/youtube_cookies.txt`
+
+### 5. Start Server
+
+```bash
+uv run youtube2slack serve --port 42389
+```
+
+Configure Slack slash command:
+- Request URL: `https://your-domain.com/slack/commands`
+- Command: `/youtube2thread`
 
 ## Usage
 
-### 🆕 Slack Thread Mode (Recommended)
+### Slash Command (Recommended)
 
-Process videos and create dedicated Slack threads:
-
-```bash
-# Process video and create thread in Slack
-youtube2slack thread https://www.youtube.com/watch?v=VIDEO_ID --channel general
-
-# With custom model and timestamps
-youtube2slack thread https://www.youtube.com/watch?v=VIDEO_ID \
-  --channel general \
-  --whisper-model large \
-  --include-timestamps
-```
-
-**Requirements for thread mode:**
-- `SLACK_BOT_TOKEN` environment variable
-- Bot must be invited to target channel
-
-### 🆕 Slack Server Mode (Slash Commands)
-
-Start server to handle slash commands:
-
-```bash
-# Start server for slash commands
-youtube2slack serve --port 3000
-
-# Configure your Slack app to use:
-# Request URL: https://your-domain.com/slack/commands
-# Command: /youtube2thread
-```
-
-**Usage in Slack:**
+In Slack:
 ```
 /youtube2thread https://www.youtube.com/watch?v=VIDEO_ID
 ```
 
-### Legacy CLI Commands
+### CLI Commands
 
 ```bash
-# Single video (webhook mode)
-youtube2slack process https://www.youtube.com/watch?v=VIDEO_ID
+# Check status
+/youtube2thread-status
 
-# With custom config
-youtube2slack --config my-config.yaml process https://www.youtube.com/watch?v=VIDEO_ID
-
-# Playlist
-youtube2slack playlist https://www.youtube.com/playlist?list=PLAYLIST_ID
+# Stop processing
+/youtube2thread-stop
 ```
 
-### Real-time Live Stream Processing (VAD)
+## How It Works
 
-**🎯 Recommended for live streams** - Uses Voice Activity Detection and sentence boundary detection:
+1. **VAD Processing**: Detects voice activity in real-time
+2. **Whisper Transcription**: Converts speech to text using GPU acceleration
+3. **Sentence Boundary**: Splits text at natural breakpoints
+4. **Slack Threads**: Posts each transcribed sentence to a dedicated thread
+
+## System Requirements
+
+- **GPU**: NVIDIA GPU with CUDA for optimal performance
+- **Memory**: 4GB+ RAM for medium Whisper model
+- **Network**: Stable connection for YouTube streaming
+
+## Performance
+
+- **CPU-only**: ~142% CPU usage (not recommended for real-time)
+- **CUDA**: ~13% CPU usage, ~1GB GPU memory (recommended)
+- **Latency**: ~2-3 seconds from speech to Slack post
+
+## Configuration
+
+### Whisper Models
+
+| Model | Size | Speed | Quality |
+|-------|------|-------|---------|
+| `tiny` | 39MB | Fastest | Basic |
+| `base` | 74MB | Fast | Good |
+| `medium` | 769MB | Moderate | **Recommended** |
+| `large` | 1550MB | Slow | Best |
+
+### VAD Settings
+
+```yaml
+# Advanced VAD configuration (in code)
+vad_aggressiveness: 2  # 0-3 (higher = more strict)
+frame_duration_ms: 30  # 10, 20, or 30ms
+```
+
+## Troubleshooting
+
+### YouTube Bot Detection
+
+If you get "Sign in to confirm you're not a bot" errors:
+1. Ensure `cookies/youtube_cookies.txt` exists
+2. Re-export fresh cookies from your browser
+3. Check logs for "Using cookies file" message
+
+### CUDA Issues
 
 ```bash
-# Process live YouTube stream with VAD
-youtube2slack vad-stream https://www.youtube.com/live/STREAM_ID
+# Check CUDA availability
+nvidia-smi
+uv run python -c "import torch; print(torch.cuda.is_available())"
 
-# Advanced VAD settings
-youtube2slack vad-stream https://www.youtube.com/live/STREAM_ID \
-  --vad-aggressiveness 2 \
-  --frame-duration 30 \
-  --whisper-model large
-
-# With custom Slack webhook
-youtube2slack vad-stream https://www.youtube.com/live/STREAM_ID \
-  --slack-webhook "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+# If CUDA unavailable, fall back to CPU
+whisper:
+  device: "cpu"
 ```
 
-**VAD Features:**
-- ✅ No overlap or duplication
-- ✅ Natural sentence boundaries (句読点で分割)
-- ✅ Real-time processing without waiting for download
-- ✅ Automatic speech/silence detection
-- ✅ Continuous stream processing
+### Performance Issues
 
-### Legacy Stream Processing
-
-```bash
-# Simple chunked stream processing (may have overlaps)
-youtube2slack stream https://www.youtube.com/live/STREAM_ID --chunk-duration 15
-```
-
-## Thread vs Webhook Mode
-
-| Feature | Thread Mode (New) | Webhook Mode (Legacy) |
-|---------|------------------|----------------------|
-| **Organization** | ✅ Each video gets its own thread | ❌ All messages in channel |
-| **Slash Commands** | ✅ `/youtube2thread` support | ❌ Not supported |
-| **Real-time Updates** | ✅ Processing status updates | ❌ Only final result |
-| **Setup** | Slack Bot API + environment variables | Simple webhook URL |
-| **Recommended for** | Production use, team collaboration | Quick setup, personal use |
-
-## Examples
-
-### Complete Setup Example
-
-1. **Set up Slack Bot:**
-```bash
-export SLACK_BOT_TOKEN="xoxb-1234567890-abcdef..."
-export SLACK_SIGNING_SECRET="abc123def456..."
-```
-
-2. **Process a video with thread:**
-```bash
-youtube2slack thread "https://www.youtube.com/watch?v=dQw4w9WgXcQ" --channel general
-```
-
-3. **Start slash command server:**
-```bash
-youtube2slack serve --port 3000
-```
-
-4. **Use slash command in Slack:**
-```
-/youtube2thread https://www.youtube.com/watch?v=dQw4w9WgXcQ
-```
-
-### Thread Output Example
-
-```
-🧵 Thread in #general:
-┌─ 🎥 Never Gonna Give You Up - Rick Astley
-├─ 📊 Language: en | Duration: 03:32
-├─ 🔗 View on YouTube
-├─ ────────────────────────
-├─ 🔄 Processing video...
-├─ ⏳ Downloading video...
-├─ ⏳ Transcribing video...
-├─ 📝 Transcription:
-├─ "We're no strangers to love..."
-└─ ✅ Processing complete! Language detected: en
-```
+- Use CUDA for real-time processing
+- Reduce model size for faster processing
+- Check network bandwidth for live streams
 
 ## Development
 
 ```bash
-# Install with uv (recommended)
+# Install with development dependencies
 uv pip install -e ".[dev]"
 
-# Run tests
-uv run python -m pytest
-
-# Run with coverage  
-uv run python -m pytest --cov=youtube2slack
-
-# Test specific modules
-uv run python -m pytest tests/test_slack_bot.py -v
-uv run python -m pytest tests/test_slack_server.py -v
-
-# Format code
-uv run black src tests
-
-# Type checking
-uv run mypy src
+# Run with debug logging
+uv run youtube2slack serve --verbose
 ```
-
-## API Reference
-
-### CLI Commands
-
-| Command | Description |
-|---------|-------------|
-| `youtube2slack thread <url>` | Process video and create Slack thread |
-| `youtube2slack serve` | Start slash command server |
-| `youtube2slack process <url>` | Legacy webhook mode processing |
-| `youtube2slack vad-stream <url>` | Real-time VAD stream processing |
-| `youtube2slack create-config` | Create sample config file |
-
-### Environment Variables
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `SLACK_BOT_TOKEN` | Yes (thread mode) | Bot User OAuth Token (xoxb-...) |
-| `SLACK_SIGNING_SECRET` | Yes (server mode) | App signing secret for webhooks |
-| `SLACK_APP_TOKEN` | Optional | App-Level Token for Socket Mode (xapp-...) |
-| `SLACK_DEFAULT_CHANNEL` | Optional | Default channel name (without #) |
-
-### Slack Bot Permissions
-
-Required OAuth scopes for your Slack app:
-- `chat:write` - Post messages and create threads
-- `channels:read` - Read channel list to resolve channel names
-- `commands` - Handle slash commands (if using server mode)
 
 ## License
 
