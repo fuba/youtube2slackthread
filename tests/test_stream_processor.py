@@ -61,7 +61,7 @@ class TestStreamProcessor:
         assert processor.transcriber == mock_transcriber
         assert processor.slack_client == mock_slack_client
         assert processor.chunk_duration == 30
-        assert processor.overlap_duration == 5
+        assert processor.overlap_duration == 0  # Forced to 0 for live streams
         assert processor.is_running is False
         assert processor.temp_dir is not None
         assert os.path.exists(processor.temp_dir)
@@ -231,20 +231,126 @@ class TestStreamProcessor:
         
         processor._post_chunk_to_slack(chunk_info, transcription)
         
+        # Verify Slack client was called with send_message (not send_blocks)
+        mock_slack_client.send_message.assert_called_once()
+        
+        # Check the message content for first chunk (index 0)
+        call_args = mock_slack_client.send_message.call_args
+        message = call_args[0][0]
+        
+        # Should include stream title for first chunk
+        assert '🔴 Test Stream' in message
+        assert 'This is a test transcription.' in message
+
+    def test_post_subsequent_chunk_to_slack(self, mock_transcriber, mock_slack_client):
+        """Test posting subsequent chunks to Slack (text only)."""
+        processor = StreamProcessor(
+            transcriber=mock_transcriber,
+            slack_client=mock_slack_client
+        )
+        
+        processor.stream_info = {
+            'title': 'Test Stream',
+            'url': 'https://youtube.com/watch?v=test'
+        }
+        
+        # Test subsequent chunk (index > 0)
+        chunk_info = {
+            'index': 5,  # Not first chunk
+            'start_time': 300.0
+        }
+        
+        transcription = {
+            'text': 'This is chunk 6 text.',
+            'language': 'en'
+        }
+        
+        processor._post_chunk_to_slack(chunk_info, transcription)
+        
         # Verify Slack client was called
-        mock_slack_client.send_blocks.assert_called_once()
+        mock_slack_client.send_message.assert_called_once()
         
-        # Check the blocks structure
-        call_args = mock_slack_client.send_blocks.call_args
-        blocks = call_args[0][0]
+        # Check message content for subsequent chunk
+        call_args = mock_slack_client.send_message.call_args
+        message = call_args[0][0]
         
-        # Should have header block
-        assert blocks[0]['type'] == 'header'
-        assert 'Test Stream' in blocks[0]['text']['text']
-        assert '00:01:00' in blocks[0]['text']['text']  # Formatted timestamp
+        # Should NOT include stream title, just the text
+        assert message == 'This is chunk 6 text.'
+        assert '🔴' not in message
         
-        # Should have content block
-        assert any('This is a test transcription' in str(block) for block in blocks)
+    def test_duplicate_text_detection(self, mock_transcriber, mock_slack_client):
+        """Test duplicate text detection and filtering."""
+        processor = StreamProcessor(
+            transcriber=mock_transcriber,
+            slack_client=mock_slack_client
+        )
+        
+        processor.stream_info = {
+            'title': 'Test Stream',
+            'url': 'https://youtube.com/watch?v=test'
+        }
+        
+        # First chunk with original text
+        chunk_info_1 = {'index': 1, 'start_time': 10.0}
+        transcription_1 = {'text': 'Hello world this is a test', 'language': 'en'}
+        processor._post_chunk_to_slack(chunk_info_1, transcription_1)
+        
+        # Second chunk with exact duplicate
+        chunk_info_2 = {'index': 2, 'start_time': 20.0}
+        transcription_2 = {'text': 'Hello world this is a test', 'language': 'en'}
+        processor._post_chunk_to_slack(chunk_info_2, transcription_2)
+        
+        # Third chunk with similar text (should be detected as duplicate)
+        chunk_info_3 = {'index': 3, 'start_time': 30.0}
+        transcription_3 = {'text': 'Hello world this is a test message', 'language': 'en'}
+        processor._post_chunk_to_slack(chunk_info_3, transcription_3)
+        
+        # Fourth chunk with different text (should not be duplicate)
+        chunk_info_4 = {'index': 4, 'start_time': 40.0}
+        transcription_4 = {'text': 'Completely different message here', 'language': 'en'}
+        processor._post_chunk_to_slack(chunk_info_4, transcription_4)
+        
+        # Should have only called send_message twice (original + different text)
+        assert mock_slack_client.send_message.call_count == 2
+        
+    def test_is_duplicate_text(self, mock_transcriber):
+        """Test duplicate text detection logic."""
+        processor = StreamProcessor(transcriber=mock_transcriber)
+        
+        # Empty recent texts - nothing is duplicate
+        assert not processor._is_duplicate_text("Any text")
+        
+        # Add some texts
+        processor.recent_texts = ["Hello world", "Another message", "Third text"]
+        
+        # Exact match should be duplicate
+        assert processor._is_duplicate_text("Hello world")
+        
+        # Similar text (high overlap) should be duplicate
+        assert processor._is_duplicate_text("Hello world test")
+        assert processor._is_duplicate_text("world Hello")
+        
+        # Very different text should not be duplicate
+        assert not processor._is_duplicate_text("Completely different message")
+        
+        # Empty text should not be duplicate
+        assert not processor._is_duplicate_text("")
+        
+    def test_normalize_text(self, mock_transcriber):
+        """Test text normalization for duplicate detection."""
+        processor = StreamProcessor(transcriber=mock_transcriber)
+        
+        # Test punctuation removal and lowercasing
+        assert processor._normalize_text("Hello, World!") == "hello world"
+        
+        # Test extra whitespace removal
+        assert processor._normalize_text("  multiple   spaces  ") == "multiple spaces"
+        
+        # Test mixed case and punctuation
+        assert processor._normalize_text("Test... Text?!") == "test text"
+        
+        # Test Japanese text (should preserve characters)
+        assert processor._normalize_text("こんにちは、世界！") == "こんにちは世界"
 
     def test_cleanup_chunk(self, mock_transcriber, temp_dir):
         """Test chunk cleanup."""
@@ -284,7 +390,7 @@ class TestStreamProcessor:
         assert status['is_running'] is True
         assert status['stream_info']['title'] == 'Test Stream'
         assert status['chunk_duration'] == 45
-        assert status['overlap_duration'] == 10
+        assert status['overlap_duration'] == 0  # Forced to 0 for live streams
         assert 'pending_chunks' in status
         assert 'temp_dir' in status
 

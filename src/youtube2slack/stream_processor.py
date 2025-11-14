@@ -26,24 +26,27 @@ class StreamProcessor:
     """Process live YouTube streams in real-time chunks."""
 
     def __init__(self, transcriber: WhisperTranscriber, slack_client: Optional[SlackClient] = None,
-                 chunk_duration: int = 30, overlap_duration: int = 5):
+                 chunk_duration: int = 30, overlap_duration: int = 0):
         """Initialize stream processor.
         
         Args:
             transcriber: WhisperTranscriber instance
             slack_client: Optional SlackClient for posting results
             chunk_duration: Length of each audio chunk in seconds
-            overlap_duration: Overlap between chunks to avoid cutting words
+            overlap_duration: Not used for live streams (kept for compatibility)
         """
         self.transcriber = transcriber
         self.slack_client = slack_client
         self.chunk_duration = chunk_duration
-        self.overlap_duration = overlap_duration
+        self.overlap_duration = 0  # Force no overlap for live streams
         
         self.is_running = False
         self.chunk_queue = queue.Queue()
         self.processing_thread = None
         self.stream_info = {}
+        
+        # Note: For duplicate-free processing, use VADStreamProcessor instead
+        # This processor maintains compatibility for simple chunked processing
         
         # Temporary directory for audio chunks
         self.temp_dir = tempfile.mkdtemp(prefix="youtube2slack_stream_")
@@ -118,7 +121,7 @@ class StreamProcessor:
 
     def _start_stream_capture(self, stream_url: str, 
                             progress_callback: Optional[Callable[[str], None]] = None) -> None:
-        """Start capturing stream in chunks.
+        """Start capturing stream in continuous non-overlapping chunks.
         
         Args:
             stream_url: Stream URL
@@ -132,34 +135,47 @@ class StreamProcessor:
         chunk_index = 0
         
         try:
-            while self.is_running:
-                chunk_path = os.path.join(self.temp_dir, f"chunk_{chunk_index:04d}.wav")
-                
-                if progress_callback:
-                    progress_callback(f"Capturing chunk {chunk_index + 1}...")
-                
-                # Capture chunk using ffmpeg
-                success = self._capture_chunk(actual_stream_url, chunk_path, chunk_index)
-                
-                if success and os.path.exists(chunk_path):
-                    # Add chunk to processing queue
-                    chunk_info = {
-                        'path': chunk_path,
-                        'index': chunk_index,
-                        'timestamp': time.time(),
-                        'start_time': chunk_index * (self.chunk_duration - self.overlap_duration)
-                    }
-                    
-                    self.chunk_queue.put(chunk_info)
-                    logger.info(f"Added chunk {chunk_index} to processing queue")
-                    chunk_index += 1
-                else:
-                    logger.warning(f"Failed to capture chunk {chunk_index}")
-                    time.sleep(1)  # Brief pause before retrying
+            # Start a single continuous ffmpeg process and split it into chunks
+            self._start_continuous_capture(actual_stream_url, progress_callback)
                     
         except Exception as e:
             logger.error(f"Stream capture failed: {e}")
             raise StreamProcessingError(f"Stream capture failed: {e}")
+
+    def _start_continuous_capture(self, stream_url: str, 
+                                progress_callback: Optional[Callable[[str], None]] = None) -> None:
+        """Start continuous capture with time-based chunking.
+        
+        Args:
+            stream_url: Actual stream URL
+            progress_callback: Progress callback
+        """
+        chunk_index = 0
+        
+        while self.is_running:
+            chunk_path = os.path.join(self.temp_dir, f"chunk_{chunk_index:04d}.wav")
+            
+            if progress_callback:
+                progress_callback(f"Capturing chunk {chunk_index + 1}...")
+            
+            # Capture exactly chunk_duration seconds with no overlap
+            success = self._capture_chunk_no_overlap(stream_url, chunk_path, chunk_index)
+            
+            if success and os.path.exists(chunk_path):
+                # Add chunk to processing queue
+                chunk_info = {
+                    'path': chunk_path,
+                    'index': chunk_index,
+                    'timestamp': time.time(),
+                    'start_time': chunk_index * self.chunk_duration
+                }
+                
+                self.chunk_queue.put(chunk_info)
+                logger.info(f"Added chunk {chunk_index} to processing queue")
+                chunk_index += 1
+            else:
+                logger.warning(f"Failed to capture chunk {chunk_index}")
+                time.sleep(0.5)  # Brief pause before retrying
 
     def _get_actual_stream_url(self, youtube_url: str) -> Optional[str]:
         """Get the actual stream URL that ffmpeg can process.
@@ -192,6 +208,59 @@ class StreamProcessor:
             logger.error(f"Error getting stream URL: {e}")
             return None
 
+    def _capture_chunk_no_overlap(self, stream_url: str, output_path: str, chunk_index: int) -> bool:
+        """Capture a single audio chunk without overlap.
+        
+        Args:
+            stream_url: Stream URL  
+            output_path: Output file path
+            chunk_index: Chunk index number
+            
+        Returns:
+            True if successful
+        """
+        try:
+            # For live streams, each chunk captures the current live content
+            # No seeking or overlap - just continuous capture
+            cmd = [
+                'ffmpeg',
+                '-y',  # Overwrite output
+                '-i', stream_url,
+                '-t', str(self.chunk_duration),  # Exact duration only
+                '-vn',  # No video
+                '-acodec', 'pcm_s16le',  # PCM 16-bit
+                '-ar', '16000',  # 16kHz sample rate
+                '-ac', '1',  # Mono
+                '-loglevel', 'error',  # Reduce ffmpeg output
+                '-avoid_negative_ts', 'make_zero',  # Handle live stream timing
+                '-flush_packets', '1',  # Flush packets immediately
+                '-fflags', '+discardcorrupt',  # Handle stream issues gracefully
+                output_path
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, timeout=self.chunk_duration + 10)
+            
+            if result.returncode == 0 and os.path.exists(output_path):
+                file_size = os.path.getsize(output_path)
+                if file_size > 1000:  # At least 1KB of audio data
+                    logger.info(f"Successfully captured chunk {chunk_index}: {file_size} bytes")
+                    return True
+                else:
+                    logger.warning(f"Chunk {chunk_index} too small: {file_size} bytes")
+                    if os.path.exists(output_path):
+                        os.remove(output_path)
+            else:
+                logger.error(f"ffmpeg failed for chunk {chunk_index}: {result.stderr.decode()}")
+            
+            return False
+            
+        except subprocess.TimeoutExpired:
+            logger.warning(f"Chunk {chunk_index} capture timed out")
+            return False
+        except Exception as e:
+            logger.error(f"Chunk {chunk_index} capture failed: {e}")
+            return False
+
     def _capture_chunk(self, stream_url: str, output_path: str, chunk_index: int) -> bool:
         """Capture a single audio chunk from stream.
         
@@ -205,17 +274,19 @@ class StreamProcessor:
         """
         try:
             # For live streams, capture current chunk without seeking
+            # Each chunk captures the CURRENT stream content, not historical
             cmd = [
                 'ffmpeg',
                 '-y',  # Overwrite output
                 '-i', stream_url,
-                '-t', str(self.chunk_duration),  # Duration
+                '-t', str(self.chunk_duration),  # Duration only (no seeking for live streams)
                 '-vn',  # No video
                 '-acodec', 'pcm_s16le',  # PCM 16-bit
                 '-ar', '16000',  # 16kHz sample rate
                 '-ac', '1',  # Mono
                 '-loglevel', 'error',  # Reduce ffmpeg output
                 '-avoid_negative_ts', 'make_zero',  # Handle live stream timing
+                '-flush_packets', '1',  # Flush packets immediately for live streams
                 output_path
             ]
             
@@ -337,58 +408,26 @@ class StreamProcessor:
             transcription: Transcription result
         """
         try:
-            stream_time = self._format_timestamp(chunk_info['start_time'])
-            
-            blocks = [
-                {
-                    "type": "header",
-                    "text": {
-                        "type": "plain_text",
-                        "text": f"🔴 Live: {self.stream_info.get('title', 'Stream')} @ {stream_time}",
-                        "emoji": True
-                    }
-                }
-            ]
-            
-            # Add transcript text
             text = transcription['text'].strip()
-            if text:
-                blocks.append({
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": f"*Chunk {chunk_info['index'] + 1}:*\n{text}"
-                    }
-                })
+            if not text:
+                return
+            
+            # For advanced duplicate detection and VAD processing, use VADStreamProcessor
                 
-                # Add stream link
-                if 'url' in self.stream_info:
-                    blocks.append({
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": f"<{self.stream_info['url']}|🔗 View Live Stream>"
-                        }
-                    })
-                
-                # Add context
-                blocks.append({
-                    "type": "context",
-                    "elements": [
-                        {
-                            "type": "mrkdwn",
-                            "text": f"Language: {transcription.get('language', 'unknown')} | Chunk: {chunk_info['index'] + 1} | Time: {stream_time}"
-                        }
-                    ]
-                })
-                
-                self.slack_client.send_blocks(
-                    blocks,
-                    text=f"Live Stream: {text[:100]}..."
-                )
+            # For the first chunk, include stream title
+            if chunk_info['index'] == 0:
+                stream_title = self.stream_info.get('title', 'Live Stream')
+                message_text = f"🔴 {stream_title}\n\n{text}"
+            else:
+                # For subsequent chunks, just the text
+                message_text = text
+            
+            self.slack_client.send_message(message_text)
                 
         except SlackError as e:
             logger.error(f"Failed to post chunk to Slack: {e}")
+
+    # Duplicate detection methods removed - use VADStreamProcessor for advanced processing
 
     def _cleanup_chunk(self, chunk_path: str) -> None:
         """Clean up processed chunk file.

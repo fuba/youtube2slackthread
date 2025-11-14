@@ -11,6 +11,7 @@ import click
 from .workflow import YouTube2SlackWorkflow, WorkflowConfig, ProcessingResult
 from .downloader import YouTubeDownloader
 from .stream_processor import StreamProcessor
+from .vad_stream_processor import VADStreamProcessor
 from .whisper_transcriber import WhisperTranscriber
 from .slack_client import SlackClient
 
@@ -405,6 +406,96 @@ def stream(ctx, stream_url: str, chunk_duration: int, overlap: int,
             
     except Exception as e:
         click.echo(f"✗ Stream processing failed: {e}", err=True)
+        processor.stop_processing()
+        sys.exit(1)
+
+
+@cli.command()
+@click.argument('stream_url')
+@click.option('--vad-aggressiveness', '-a', default=2, type=int, 
+              help='VAD aggressiveness level (0-3, higher = more strict)')
+@click.option('--frame-duration', '-f', default=30, type=int,
+              help='VAD frame duration in ms (10, 20, or 30)')
+@click.option('--whisper-model', '-m', default='base', help='Whisper model size')
+@click.option('--language', '-l', help='Language code (auto-detect if not specified)')
+@click.option('--slack-webhook', help='Slack webhook URL')
+@click.option('--slack-channel', help='Slack channel override')
+@click.pass_context
+def vad_stream(ctx, stream_url: str, vad_aggressiveness: int, frame_duration: int,
+               whisper_model: str, language: Optional[str],
+               slack_webhook: Optional[str], slack_channel: Optional[str]):
+    """Process a live YouTube stream with Voice Activity Detection and sentence boundary detection."""
+    
+    config: WorkflowConfig = ctx.obj['config']
+    
+    # Override config with CLI options
+    if whisper_model != 'base':
+        config.whisper_model = whisper_model
+    if language:
+        config.whisper_language = language
+    if slack_webhook:
+        config.slack_webhook = slack_webhook
+    if slack_channel:
+        config.slack_channel = slack_channel
+    
+    # Validate required configuration
+    if not config.slack_webhook:
+        click.echo("Error: Slack webhook URL is required", err=True)
+        sys.exit(1)
+    
+    # Validate VAD parameters
+    if vad_aggressiveness not in [0, 1, 2, 3]:
+        click.echo("Error: VAD aggressiveness must be 0-3", err=True)
+        sys.exit(1)
+    
+    if frame_duration not in [10, 20, 30]:
+        click.echo("Error: Frame duration must be 10, 20, or 30 ms", err=True)
+        sys.exit(1)
+    
+    # Initialize components
+    click.echo("Initializing VAD stream processor...")
+    
+    transcriber = WhisperTranscriber(
+        model_name=config.whisper_model,
+        device=config.whisper_device,
+        download_root=config.whisper_download_root
+    )
+    
+    slack_client = SlackClient(
+        webhook_url=config.slack_webhook,
+        channel=config.slack_channel
+    )
+    
+    processor = VADStreamProcessor(
+        transcriber=transcriber,
+        slack_client=slack_client,
+        vad_aggressiveness=vad_aggressiveness,
+        frame_duration_ms=frame_duration
+    )
+    
+    def progress_callback(message: str):
+        click.echo(f"  {message}")
+    
+    try:
+        click.echo(f"🔴 Starting VAD-based stream processing...")
+        click.echo(f"🎤 VAD aggressiveness: {vad_aggressiveness} | Frame: {frame_duration}ms")
+        click.echo(f"📝 Processing speech segments with sentence boundary detection")
+        click.echo("Press Ctrl+C to stop processing")
+        
+        # Start processing
+        processor.start_stream_processing(stream_url, progress_callback)
+        
+        # Keep running until interrupted
+        try:
+            while processor.is_running:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            click.echo("\n🛑 Stopping VAD stream processing...")
+            processor.stop_processing()
+            click.echo("✓ VAD stream processing stopped")
+            
+    except Exception as e:
+        click.echo(f"✗ VAD stream processing failed: {e}", err=True)
         processor.stop_processing()
         sys.exit(1)
 
