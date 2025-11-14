@@ -124,6 +124,11 @@ class StreamProcessor:
             stream_url: Stream URL
             progress_callback: Progress callback
         """
+        # Get the actual stream URL that ffmpeg can process
+        actual_stream_url = self._get_actual_stream_url(stream_url)
+        if not actual_stream_url:
+            raise StreamProcessingError("Could not get actual stream URL")
+            
         chunk_index = 0
         
         try:
@@ -134,7 +139,7 @@ class StreamProcessor:
                     progress_callback(f"Capturing chunk {chunk_index + 1}...")
                 
                 # Capture chunk using ffmpeg
-                success = self._capture_chunk(stream_url, chunk_path, chunk_index)
+                success = self._capture_chunk(actual_stream_url, chunk_path, chunk_index)
                 
                 if success and os.path.exists(chunk_path):
                     # Add chunk to processing queue
@@ -156,11 +161,42 @@ class StreamProcessor:
             logger.error(f"Stream capture failed: {e}")
             raise StreamProcessingError(f"Stream capture failed: {e}")
 
+    def _get_actual_stream_url(self, youtube_url: str) -> Optional[str]:
+        """Get the actual stream URL that ffmpeg can process.
+        
+        Args:
+            youtube_url: YouTube URL
+            
+        Returns:
+            Actual stream URL or None if failed
+        """
+        try:
+            cmd = [
+                'yt-dlp',
+                '-g',  # Get URL
+                '-f', 'best[ext=mp4]',  # Best quality mp4 format
+                youtube_url
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            
+            if result.returncode == 0 and result.stdout.strip():
+                actual_url = result.stdout.strip().split('\n')[0]
+                logger.info(f"Got actual stream URL: {actual_url[:100]}...")
+                return actual_url
+            else:
+                logger.error(f"Failed to get stream URL: {result.stderr}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error getting stream URL: {e}")
+            return None
+
     def _capture_chunk(self, stream_url: str, output_path: str, chunk_index: int) -> bool:
         """Capture a single audio chunk from stream.
         
         Args:
-            stream_url: Stream URL
+            stream_url: Stream URL  
             output_path: Output file path
             chunk_index: Chunk index number
             
@@ -168,31 +204,34 @@ class StreamProcessor:
             True if successful
         """
         try:
-            # Calculate start position based on chunk index
-            start_offset = chunk_index * (self.chunk_duration - self.overlap_duration)
-            
+            # For live streams, capture current chunk without seeking
             cmd = [
                 'ffmpeg',
                 '-y',  # Overwrite output
                 '-i', stream_url,
-                '-ss', str(start_offset),  # Start position
                 '-t', str(self.chunk_duration),  # Duration
                 '-vn',  # No video
                 '-acodec', 'pcm_s16le',  # PCM 16-bit
                 '-ar', '16000',  # 16kHz sample rate
                 '-ac', '1',  # Mono
                 '-loglevel', 'error',  # Reduce ffmpeg output
+                '-avoid_negative_ts', 'make_zero',  # Handle live stream timing
                 output_path
             ]
             
-            result = subprocess.run(cmd, capture_output=True, timeout=self.chunk_duration + 10)
+            result = subprocess.run(cmd, capture_output=True, timeout=self.chunk_duration + 15)
             
             if result.returncode == 0 and os.path.exists(output_path):
                 file_size = os.path.getsize(output_path)
                 if file_size > 1000:  # At least 1KB of audio data
+                    logger.info(f"Successfully captured chunk {chunk_index}: {file_size} bytes")
                     return True
                 else:
                     logger.warning(f"Chunk {chunk_index} too small: {file_size} bytes")
+                    if os.path.exists(output_path):
+                        os.remove(output_path)
+            else:
+                logger.error(f"ffmpeg failed for chunk {chunk_index}: {result.stderr.decode()}")
             
             return False
             
