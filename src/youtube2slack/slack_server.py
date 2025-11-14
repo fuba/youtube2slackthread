@@ -372,12 +372,25 @@ class SlackServer:
             
             # Create VAD processor (existing working implementation)
             vad_processor = VADStreamProcessor(
-                transcriber=transcriber
+                transcriber=transcriber,
+                cookies_file=self.workflow_config.youtube_cookies_file
             )
             
             # Create thread first
             import yt_dlp
-            ydl_opts = {'quiet': True, 'no_warnings': True}
+            ydl_opts = {
+                'quiet': True, 
+                'no_warnings': True,
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                }
+            }
+            
+            # Add cookies if available
+            if self.workflow_config.youtube_cookies_file and os.path.exists(self.workflow_config.youtube_cookies_file):
+                ydl_opts['cookiefile'] = self.workflow_config.youtube_cookies_file
+                logger.info(f"Using cookies for video info: {self.workflow_config.youtube_cookies_file}")
+            
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(video_url, download=False)
                 video_title = info.get('title', 'Unknown Stream')

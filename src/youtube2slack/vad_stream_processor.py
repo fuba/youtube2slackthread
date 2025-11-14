@@ -35,15 +35,18 @@ class VADStreamProcessor:
     """Process live YouTube streams with Voice Activity Detection."""
 
     def __init__(self, transcriber: WhisperTranscriber,
-                 vad_aggressiveness: int = 2, frame_duration_ms: int = 30):
+                 vad_aggressiveness: int = 2, frame_duration_ms: int = 30, 
+                 cookies_file: Optional[str] = None):
         """Initialize VAD stream processor.
         
         Args:
             transcriber: WhisperTranscriber instance
             vad_aggressiveness: VAD aggressiveness level (0-3, higher = more strict)
             frame_duration_ms: Frame duration for VAD analysis (10, 20, or 30 ms)
+            cookies_file: Path to Netscape-format cookies file for YouTube authentication
         """
         self.transcriber = transcriber
+        self.cookies_file = cookies_file
         self.vad_aggressiveness = vad_aggressiveness
         self.frame_duration_ms = frame_duration_ms
         
@@ -191,9 +194,18 @@ class VADStreamProcessor:
                 'yt-dlp',
                 '-g',  # Get URL
                 '-f', 'best[ext=mp4]',  # Best quality mp4 format
-                youtube_url
+                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',  # Use newer Chrome user agent
+                '--remote-components', 'ejs:github',  # Enable JavaScript challenge solver
             ]
             
+            # Add cookies file if specified
+            if self.cookies_file and os.path.exists(self.cookies_file):
+                cmd.extend(['--cookies', self.cookies_file])
+                logger.info(f"Using cookies file: {self.cookies_file}")
+            
+            cmd.append(youtube_url)
+            
+            logger.info(f"Executing yt-dlp command: {' '.join(cmd)}")
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             
             if result.returncode == 0 and result.stdout.strip():

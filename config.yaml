@@ -1,0 +1,18 @@
+# YouTube2Slack Configuration File
+
+youtube:
+  download_dir: "./downloads"        # Directory to save downloaded videos
+  format: "best"                     # Video format (best, bestaudio, etc.)
+  keep_video: true                   # Whether to keep video files after processing
+  cookies_file: "./cookies/youtube_cookies.txt"  # Path to cookies file (Netscape format)
+
+whisper:
+  model: "medium"                   # Whisper model (tiny, base, small, medium, large) 
+  device: "cuda"                    # Device to use (cpu, cuda, or null for auto)
+  language: null                     # Language code (en, ja, etc. or null for auto-detect)
+
+slack:
+  webhook_url: null                  # Legacy webhook URL (not used in current implementation)
+  channel: null                      # Optional channel override (e.g., "#transcripts")
+  include_timestamps: false          # Include timestamps in transcription
+  send_errors_to_slack: true         # Send error notifications to Slack

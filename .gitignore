@@ -71,4 +71,4 @@ models/
 
 # Slack tokens
 slack_config.json
-.slack_token
+.slack_tokencookies/*.txt

@@ -17,6 +17,9 @@ class WorkflowConfig:
     video_format: str = "best"
     keep_video: bool = True
     
+    # YouTube settings
+    youtube_cookies_file: Optional[str] = None
+    
     # Whisper settings
     whisper_model: str = "base"
     whisper_device: Optional[str] = None
@@ -48,6 +51,7 @@ class WorkflowConfig:
             download_dir=youtube_config.get('download_dir', './downloads'),
             video_format=youtube_config.get('format', 'best'),
             keep_video=youtube_config.get('keep_video', True),
+            youtube_cookies_file=youtube_config.get('cookies_file'),
             
             # Whisper settings
             whisper_model=whisper_config.get('model', 'base'),
