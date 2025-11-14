@@ -11,9 +11,8 @@ from urllib.parse import parse_qs
 from flask import Flask, request, jsonify
 from slack_sdk.signature import SignatureVerifier
 
-from .workflow import YouTube2SlackWorkflow, WorkflowConfig
+from .workflow import WorkflowConfig
 from .slack_bot_client import SlackBotClient, ThreadInfo, SlackBotError
-from .vad_thread_processor import VADThreadProcessor, VADThreadProcessingError
 from .whisper_transcriber import WhisperTranscriber
 
 
@@ -151,10 +150,9 @@ class SlackServer:
                 except:
                     pass
             
-            # Get active threads count and VAD streams
+            # Get active threads count
             active_threads = len(self.active_threads)
-            active_vad_streams = VADThreadProcessor.get_active_streams()
-            vad_stream_count = len(active_vad_streams)
+            vad_stream_count = 0
             
             # Get bot info
             bot_info = "Unknown"
@@ -195,7 +193,7 @@ class SlackServer:
                         },
                         {
                             "type": "mrkdwn",
-                            "text": f"*VAD Streams:*\n{vad_stream_count}"
+                            "text": f"*Processing Streams:*\n{vad_stream_count}"
                         }
                     ]
                 },
@@ -261,17 +259,7 @@ class SlackServer:
                     "type": "section",
                     "text": {
                         "type": "mrkdwn",
-                        "text": "*🎬 Active VAD Streams:*"
-                    }
-                },
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": "\n".join([
-                            f"• *{info['title'][:50]}{'...' if len(info['title']) > 50 else ''}* (ID: {stream_id})"
-                            for stream_id, info in active_vad_streams.items()
-                        ]) if active_vad_streams else "No active VAD streams"
+                        "text": "*🎬 Active Streams:*\nNo active streams"
                     }
                 },
                 {
@@ -309,44 +297,11 @@ class SlackServer:
             JSON response
         """
         try:
-            active_streams = VADThreadProcessor.get_active_streams()
-            
-            if not active_streams:
-                return jsonify({
-                    'response_type': 'ephemeral',
-                    'text': 'No active streams to stop.'
-                })
-            
-            # If specific stream ID provided, stop that one
-            if text.strip():
-                stream_id = text.strip()
-                if VADThreadProcessor.stop_stream_by_id(stream_id):
-                    return jsonify({
-                        'response_type': 'ephemeral',
-                        'text': f'🛑 Stopped stream: {stream_id}'
-                    })
-                else:
-                    return jsonify({
-                        'response_type': 'ephemeral',
-                        'text': f'Stream not found: {stream_id}'
-                    })
-            else:
-                # No specific ID - show list and stop all if user confirms
-                if len(active_streams) == 1:
-                    stream_id = list(active_streams.keys())[0]
-                    VADThreadProcessor.stop_stream_by_id(stream_id)
-                    stream_info = list(active_streams.values())[0]
-                    return jsonify({
-                        'response_type': 'ephemeral',
-                        'text': f'🛑 Stopped stream: {stream_info["title"]}'
-                    })
-                else:
-                    # Multiple streams - stop all
-                    stopped_count = VADThreadProcessor.stop_all_streams()
-                    return jsonify({
-                        'response_type': 'ephemeral',
-                        'text': f'🛑 Stopped {stopped_count} active streams.'
-                    })
+            # Note: Stream stopping not implemented in VADStreamProcessor
+            return jsonify({
+                'response_type': 'ephemeral',
+                'text': '⚠️ Stream stopping not yet implemented for this processor.'
+            })
                     
         except Exception as e:
             logger.error(f"Error stopping streams: {e}")
@@ -383,7 +338,7 @@ class SlackServer:
                 'text': 'Please provide a valid YouTube URL.'
             })
         
-        # TESTING: Use simpler VAD stream processing
+        # Start VAD stream processing
         thread = threading.Thread(
             target=self._process_simple_vad_in_background,
             args=(text, channel_id, user_id, response_url)
@@ -393,12 +348,12 @@ class SlackServer:
         
         return jsonify({
             'response_type': 'ephemeral',
-            'text': f'🚀 Starting simple VAD stream processing: {text}\nI\'ll create a thread when ready!'
+            'text': f'🚀 Starting VAD stream processing: {text}\nI\'ll create a thread when ready!'
         })
     
-    def _process_vad_stream_in_background(self, video_url: str, channel_id: str, 
+    def _process_simple_vad_in_background(self, video_url: str, channel_id: str, 
                                         user_id: str, response_url: str) -> None:
-        """Process video/stream with VAD in background thread.
+        """VAD processing using VADStreamProcessor.
         
         Args:
             video_url: YouTube video/stream URL
@@ -406,59 +361,6 @@ class SlackServer:
             user_id: User ID who initiated the command
             response_url: Response URL for updates
         """
-        try:
-            # Create transcriber
-            transcriber = WhisperTranscriber(
-                model_name=self.workflow_config.whisper_model,
-                device=self.workflow_config.whisper_device
-            )
-            
-            # Create VAD processor
-            vad_processor = VADThreadProcessor(
-                transcriber=transcriber,
-                slack_bot_client=self.bot_client,
-                vad_aggressiveness=2
-            )
-            
-            # Define progress callback
-            def progress_callback(message: str):
-                logger.info(f"VAD Progress: {message}")
-            
-            # Start VAD stream processing
-            thread_info = vad_processor.start_stream_processing(
-                video_url, 
-                channel_id, 
-                progress_callback
-            )
-            
-            logger.info(f"VAD processing started for {video_url} in thread {thread_info.thread_ts}")
-            
-        except VADThreadProcessingError as e:
-            logger.error(f"VAD processing error: {e}")
-            try:
-                self.bot_client.send_direct_message(
-                    channel_id, 
-                    f"❌ *VAD処理エラー*\n{str(e)}"
-                )
-            except Exception:
-                pass
-                
-        except SlackBotError as e:
-            logger.error(f"Slack error during processing: {e}")
-            
-        except Exception as e:
-            logger.error(f"Unexpected error during processing: {e}")
-            try:
-                self.bot_client.send_direct_message(
-                    channel_id, 
-                    f"❌ *予期しないエラー*\n{str(e)}"
-                )
-            except Exception:
-                pass
-
-    def _process_simple_vad_in_background(self, video_url: str, channel_id: str, 
-                                        user_id: str, response_url: str) -> None:
-        """Simple VAD processing using existing VADStreamProcessor."""
         try:
             from .vad_stream_processor import VADStreamProcessor
             
@@ -488,7 +390,7 @@ class SlackServer:
                 duration=None
             )
             
-            logger.info(f"Simple VAD processing started for {video_url} in thread {thread_info.thread_ts}")
+            logger.info(f"VAD processing started for {video_url} in thread {thread_info.thread_ts}")
             
             # Start processing with callback to post to our thread
             def progress_callback(message: str):
@@ -506,112 +408,15 @@ class SlackServer:
             vad_processor.start_stream_processing(video_url, progress_callback)
             
         except Exception as e:
-            logger.error(f"Simple VAD processing error: {e}")
+            logger.error(f"VAD processing error: {e}")
             try:
                 self.bot_client.send_direct_message(
                     channel_id, 
-                    f"❌ *Simple VAD処理エラー*\n{str(e)}"
+                    f"❌ *VAD処理エラー*\n{str(e)}"
                 )
             except Exception:
                 pass
 
-    def _process_video_in_background(self, video_url: str, channel_id: str, 
-                                   user_id: str, response_url: str) -> None:
-        """Process video in background thread (legacy method for non-VAD processing).
-        
-        Args:
-            video_url: YouTube video URL
-            channel_id: Slack channel ID
-            user_id: User ID who initiated the command
-            response_url: Response URL for updates
-        """
-        thread_info = None
-        
-        try:
-            # Create workflow
-            workflow = YouTube2SlackWorkflow(self.workflow_config)
-            
-            # Get video info first for thread creation
-            video_info = workflow.downloader.get_info(video_url)
-            video_title = video_info['title']
-            duration = video_info.get('duration', 0)
-            
-            # Create thread
-            thread_info = self.bot_client.create_thread(
-                channel=channel_id,
-                video_title=video_title,
-                video_url=video_url,
-                duration=duration
-            )
-            
-            # Track thread
-            thread_key = f"{channel_id}:{video_url}"
-            self.active_threads[thread_key] = thread_info
-            
-            # Post processing status
-            self.bot_client.post_to_thread(thread_info, "🔄 *Processing video...*")
-            
-            def progress_callback(message: str):
-                """Update progress in thread."""
-                self.bot_client.post_to_thread(thread_info, f"⏳ {message}")
-                logger.info(f"Progress: {message}")
-            
-            # Process video
-            result = workflow.process_video(video_url, progress_callback)
-            
-            if result.success:
-                # Post transcription to thread
-                self.bot_client.post_transcription_to_thread(
-                    thread_info,
-                    result.transcription_text,
-                    include_timestamps=self.workflow_config.include_timestamps
-                )
-                
-                # Final status
-                self.bot_client.post_to_thread(
-                    thread_info, 
-                    f"✅ *Processing complete!* Language detected: {result.language}"
-                )
-                
-                logger.info(f"Successfully processed video: {video_title}")
-                
-            else:
-                # Post error to thread
-                self.bot_client.post_error_to_thread(
-                    thread_info,
-                    result.error or "Unknown error occurred",
-                    context={
-                        'video_url': video_url,
-                        'video_title': video_title
-                    }
-                )
-                
-                logger.error(f"Failed to process video: {result.error}")
-                
-        except SlackBotError as e:
-            logger.error(f"Slack error during processing: {e}")
-            if thread_info:
-                try:
-                    self.bot_client.post_error_to_thread(thread_info, str(e))
-                except:
-                    pass
-                    
-        except Exception as e:
-            logger.error(f"Unexpected error during processing: {e}")
-            if thread_info:
-                try:
-                    self.bot_client.post_error_to_thread(
-                        thread_info, 
-                        f"Unexpected error: {e}"
-                    )
-                except:
-                    pass
-        
-        finally:
-            # Cleanup thread tracking
-            thread_key = f"{channel_id}:{video_url}"
-            if thread_key in self.active_threads:
-                del self.active_threads[thread_key]
     
     def run(self, debug: bool = False) -> None:
         """Run the Flask server.
