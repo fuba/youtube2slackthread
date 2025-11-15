@@ -14,9 +14,23 @@ from slack_sdk.signature import SignatureVerifier
 from .workflow import WorkflowConfig
 from .slack_bot_client import SlackBotClient, ThreadInfo, SlackBotError
 from .whisper_transcriber import WhisperTranscriber
+from dataclasses import dataclass
+from datetime import datetime
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ActiveStreamInfo:
+    """Information about an active stream processing."""
+    thread_info: ThreadInfo
+    video_url: str
+    user_id: str
+    started_at: datetime
+    processor: Optional[Any] = None
+    is_running: bool = True
+    error_message: Optional[str] = None
 
 
 class SlackServer:
@@ -42,7 +56,7 @@ class SlackServer:
         self.setup_routes()
         
         # Track ongoing processing
-        self.active_threads: Dict[str, ThreadInfo] = {}
+        self.active_streams: Dict[str, ActiveStreamInfo] = {}  # key: thread_ts
         
     def setup_routes(self):
         """Setup Flask routes."""
@@ -128,8 +142,12 @@ class SlackServer:
             JSON response with status information
         """
         import platform
-        import pkg_resources
         import datetime
+        try:
+            from importlib import metadata
+        except ImportError:
+            # Fallback for Python < 3.8
+            import importlib_metadata as metadata
         
         try:
             # Get system information
@@ -146,13 +164,13 @@ class SlackServer:
             
             for package_name in packages:
                 try:
-                    packages[package_name] = pkg_resources.get_distribution(package_name).version
+                    packages[package_name] = metadata.version(package_name)
                 except:
                     pass
             
-            # Get active threads count
-            active_threads = len(self.active_threads)
-            vad_stream_count = 0
+            # Get active streams count
+            active_streams_count = len(self.active_streams)
+            running_streams_count = sum(1 for stream in self.active_streams.values() if stream.is_running)
             
             # Get bot info
             bot_info = "Unknown"
@@ -189,11 +207,11 @@ class SlackServer:
                         },
                         {
                             "type": "mrkdwn",
-                            "text": f"*Active Threads:*\n{active_threads}"
+                            "text": f"*Active Streams:*\n{active_streams_count}"
                         },
                         {
                             "type": "mrkdwn",
-                            "text": f"*Processing Streams:*\n{vad_stream_count}"
+                            "text": f"*Running Streams:*\n{running_streams_count}"
                         }
                     ]
                 },
@@ -440,6 +458,17 @@ class SlackServer:
             
             logger.info(f"VAD processing started for {video_url} in thread {thread_info.thread_ts}")
             
+            # Record active stream info for retry functionality
+            stream_info = ActiveStreamInfo(
+                thread_info=thread_info,
+                video_url=video_url,
+                user_id=user_id,
+                started_at=datetime.now(),
+                processor=vad_processor,
+                is_running=True
+            )
+            self.active_streams[thread_info.thread_ts] = stream_info
+            
             # Start processing with callback to post to our thread
             def progress_callback(message: str):
                 # Filter out progress messages - only post actual transcription content
@@ -457,6 +486,14 @@ class SlackServer:
             
         except Exception as e:
             logger.error(f"VAD processing error: {e}")
+            
+            # Update stream status if we have the thread info
+            if 'thread_info' in locals():
+                thread_ts = thread_info.thread_ts
+                if thread_ts in self.active_streams:
+                    self.active_streams[thread_ts].is_running = False
+                    self.active_streams[thread_ts].error_message = str(e)
+            
             try:
                 error_msg = str(e)
                 
@@ -521,15 +558,31 @@ class SlackServer:
                 return f'🚀 Starting VAD stream processing: {text}\nI\'ll create a thread when ready!'
                 
             elif command == '/youtube2thread-status':
-                # Handle status command with app context
+                # Handle status command with app context - send blocks directly
                 with self.app.app_context():
                     response = self._handle_status_command(channel, user_id)
-                    # Extract text from JSON response for Socket Mode
+                    # Extract response data
                     if isinstance(response, tuple):
                         response_data = response[0].json
                     else:
                         response_data = response.json
-                    return response_data.get('text', 'Status retrieved')
+                    
+                    # Send blocks directly via web client for full status display
+                    try:
+                        blocks = response_data.get('blocks', [])
+                        if blocks:
+                            self.bot_client.web_client.chat_postEphemeral(
+                                channel=channel,
+                                user=user_id,
+                                text="🔧 YouTube2SlackThread Status",
+                                blocks=blocks
+                            )
+                            return None  # Don't return text since we already posted
+                        else:
+                            return response_data.get('text', '✅ Status retrieved')
+                    except Exception as e:
+                        logger.error(f"Failed to send status blocks: {e}")
+                        return response_data.get('text', 'Status retrieved')
                     
             elif command == '/youtube2thread-stop':
                 with self.app.app_context():
@@ -577,6 +630,14 @@ class SlackServer:
                         )
                     except Exception as e:
                         logger.error(f"Failed to send ephemeral response: {e}")
+                        
+            elif req.type == "events_api":
+                # Handle events like messages
+                event = req.payload.get("event", {})
+                event_type = event.get("type")
+                
+                if event_type == "message":
+                    self._handle_message_event(event)
             
         except Exception as e:
             logger.error(f"Error in _handle_all_socket_events: {e}")
@@ -584,6 +645,150 @@ class SlackServer:
             # Always acknowledge
             response = SocketModeResponse(envelope_id=req.envelope_id)
             client.send_socket_mode_response(response)
+    
+    def _handle_message_event(self, event: Dict[str, Any]) -> None:
+        """Handle message events in threads for retry detection."""
+        try:
+            # Check if message is in a thread
+            thread_ts = event.get('thread_ts')
+            if not thread_ts:
+                return  # Not a thread message
+            
+            text = event.get('text', '').strip().lower()
+            user_id = event.get('user')
+            channel_id = event.get('channel')
+            
+            # Ignore bot messages
+            if event.get('bot_id') or event.get('subtype') == 'bot_message':
+                return
+            
+            logger.info(f"Thread message from {user_id} in {thread_ts}: '{text}'")
+            
+            # Check for retry command
+            if text in ['retry', 'restart', '再開', 'リトライ']:
+                self._handle_retry_request(thread_ts, channel_id, user_id)
+                
+        except Exception as e:
+            logger.error(f"Error handling message event: {e}")
+    
+    def _handle_retry_request(self, thread_ts: str, channel_id: str, user_id: str) -> None:
+        """Handle retry request from user."""
+        try:
+            # Find the stream info for this thread
+            stream_info = self.active_streams.get(thread_ts)
+            
+            if not stream_info:
+                # Check if this thread had a previous failed stream
+                self.bot_client.post_to_thread(
+                    ThreadInfo(channel=channel_id, thread_ts=thread_ts),
+                    "❌ このスレッドでアクティブな処理が見つかりません。新しい動画処理を開始するには `/youtube2thread <URL>` を使用してください。"
+                )
+                return
+            
+            if stream_info.is_running and stream_info.processor:
+                self.bot_client.post_to_thread(
+                    stream_info.thread_info,
+                    "ℹ️ 処理は既に実行中です。"
+                )
+                return
+            
+            # Mark as restarting
+            self.bot_client.post_to_thread(
+                stream_info.thread_info,
+                "🔄 処理を再開しています..."
+            )
+            
+            logger.info(f"Retrying stream processing for thread {thread_ts} requested by {user_id}")
+            
+            # Start new processing in background thread
+            import threading
+            retry_thread = threading.Thread(
+                target=self._restart_stream_processing,
+                args=(stream_info, user_id)
+            )
+            retry_thread.daemon = True
+            retry_thread.start()
+            
+        except Exception as e:
+            logger.error(f"Error handling retry request: {e}")
+            try:
+                self.bot_client.post_to_thread(
+                    ThreadInfo(channel=channel_id, thread_ts=thread_ts),
+                    f"❌ リトライ処理中にエラーが発生しました: {str(e)}"
+                )
+            except Exception:
+                pass
+                
+    def _restart_stream_processing(self, stream_info: ActiveStreamInfo, retry_user_id: str) -> None:
+        """Restart stream processing for a thread."""
+        try:
+            logger.info(f"Restarting stream processing for {stream_info.video_url}")
+            
+            # Stop existing processor if still running
+            if stream_info.processor and hasattr(stream_info.processor, 'stop_processing'):
+                try:
+                    stream_info.processor.stop_processing()
+                except Exception as e:
+                    logger.warning(f"Error stopping existing processor: {e}")
+            
+            # Update stream info
+            stream_info.is_running = True
+            stream_info.error_message = None
+            stream_info.processor = None  # Will be set by new processor
+            
+            # Use same logic as original processing
+            from .vad_stream_processor import VADStreamProcessor
+            
+            # Create transcriber
+            transcriber = WhisperTranscriber(
+                model_name=self.workflow_config.whisper_model,
+                device=self.workflow_config.whisper_device
+            )
+            
+            # Get user-specific cookies if available
+            user_cookies_file = self.workflow_config.get_cookies_file_for_user(stream_info.user_id)
+            
+            # Create VAD processor with user-specific cookies
+            vad_processor = VADStreamProcessor(
+                transcriber=transcriber,
+                cookies_file=user_cookies_file,
+                user_id=stream_info.user_id
+            )
+            
+            # Update processor in stream info
+            stream_info.processor = vad_processor
+            
+            # Progress callback
+            def progress_callback(message: str):
+                if (message.strip() and 
+                    not message.startswith("Processing speech segment") and
+                    not message.startswith("Processing continuous audio stream") and
+                    not message.startswith("Starting VAD stream")):
+                    try:
+                        self.bot_client.post_to_thread(stream_info.thread_info, message)
+                        logger.info(f"Posted to thread: {message[:50]}...")
+                    except Exception as e:
+                        logger.error(f"Failed to post to thread: {e}")
+            
+            # Start processing
+            vad_processor.start_stream_processing(stream_info.video_url, progress_callback)
+            
+            logger.info(f"Successfully restarted stream processing for thread {stream_info.thread_info.thread_ts}")
+            
+        except Exception as e:
+            logger.error(f"Failed to restart stream processing: {e}")
+            
+            # Update error state
+            stream_info.is_running = False
+            stream_info.error_message = str(e)
+            
+            try:
+                self.bot_client.post_to_thread(
+                    stream_info.thread_info,
+                    f"❌ リトライに失敗しました: {str(e)}\n\n再度 'retry' と入力するか、新しいコマンドで処理を開始してください。"
+                )
+            except Exception:
+                pass
 
     def _is_video_info_cookie_error(self, error_message: str) -> bool:
         """Check if video info extraction error is due to cookie authentication failure."""
@@ -633,13 +838,22 @@ class SlackServer:
         
         self.app.run(host='0.0.0.0', port=self.port, debug=debug)
     
+    def get_active_streams(self) -> Dict[str, ActiveStreamInfo]:
+        """Get currently active stream processing.
+        
+        Returns:
+            Dictionary of active stream info
+        """
+        return self.active_streams.copy()
+        
     def get_active_threads(self) -> Dict[str, ThreadInfo]:
-        """Get currently active threads.
+        """Get currently active threads (legacy compatibility).
         
         Returns:
             Dictionary of active threads
         """
-        return self.active_threads.copy()
+        return {thread_ts: stream_info.thread_info 
+                for thread_ts, stream_info in self.active_streams.items()}
 
 
 def create_slack_server(config_path: Optional[str] = None, port: int = 42389) -> SlackServer:

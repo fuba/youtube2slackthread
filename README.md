@@ -11,6 +11,7 @@ Real-time YouTube transcription to Slack threads using Voice Activity Detection 
 - **🚀 CUDA acceleration** - GPU-powered Whisper transcription
 - **🔒 User-specific cookie management** - secure per-user authentication via DM
 - **🛡️ Encrypted storage** - AES-256 encryption for stored cookies
+- **🔄 Smart retry system** - restart failed processes with simple thread messages
 
 ## Quick Start
 
@@ -106,6 +107,25 @@ In Slack:
 /youtube2thread-stop
 ```
 
+### Retry Failed Processing
+
+If processing stops or fails, you can restart it by simply typing in the thread:
+```
+retry
+```
+
+**Supported retry commands:**
+- `retry` - English
+- `restart` - English alternative  
+- `再開` - Japanese
+- `リトライ` - Japanese alternative
+
+The bot will:
+- ✅ Detect the command in the thread
+- ✅ Resume processing with the same URL and user settings
+- ✅ Show restart status with emoji feedback
+- ❌ Ignore if processing is already running
+
 ## How It Works
 
 1. **VAD Processing**: Detects voice activity in real-time
@@ -146,12 +166,21 @@ frame_duration_ms: 30  # 10, 20, or 30ms
 
 ## Troubleshooting
 
+### Processing Stops or Fails
+
+If transcription suddenly stops:
+1. **Check the thread**: Look for error messages in the thread
+2. **Use retry**: Type `retry` in the thread to restart processing
+3. **Check status**: Use `/youtube2thread-status` to see active streams
+4. **Cookie issues**: May need to re-upload fresh cookies via DM
+
 ### YouTube Bot Detection
 
 If you get "Sign in to confirm you're not a bot" errors:
 1. **Re-upload fresh cookies**: DM new `cookies.txt` to the bot
 2. Check logs for "Using user-specific cookies" message
 3. Ensure you're logged into YouTube in your browser before exporting
+4. **Try retry**: After uploading new cookies, use `retry` in the thread
 
 ### Cookie Upload Issues
 
