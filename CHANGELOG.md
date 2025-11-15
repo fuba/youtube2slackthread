@@ -11,6 +11,12 @@ All notable changes to this project will be documented in this file.
   - Maintains original URL, user cookies, and configuration settings
   - User-friendly Japanese/English feedback messages
 
+- **Smart Stop System**: Thread-based stop functionality for active processing
+  - Type `stop`, `halt`, `停止`, or `ストップ` in any thread to stop processing
+  - Safe processor shutdown with proper resource cleanup
+  - Clear status feedback and suggestions for restart
+  - Prevention of duplicate stop attempts
+
 - **Enhanced Status Command**: Improved `/youtube2thread-status` command
   - Shows active streams vs running streams
   - Modern `importlib.metadata` for package version detection

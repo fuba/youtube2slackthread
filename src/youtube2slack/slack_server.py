@@ -667,6 +667,9 @@ class SlackServer:
             # Check for retry command
             if text in ['retry', 'restart', '再開', 'リトライ']:
                 self._handle_retry_request(thread_ts, channel_id, user_id)
+            # Check for stop command
+            elif text in ['stop', 'halt', '停止', 'ストップ']:
+                self._handle_stop_request(thread_ts, channel_id, user_id)
                 
         except Exception as e:
             logger.error(f"Error handling message event: {e}")
@@ -715,6 +718,87 @@ class SlackServer:
                 self.bot_client.post_to_thread(
                     ThreadInfo(channel=channel_id, thread_ts=thread_ts),
                     f"❌ リトライ処理中にエラーが発生しました: {str(e)}"
+                )
+            except Exception:
+                pass
+    
+    def _handle_stop_request(self, thread_ts: str, channel_id: str, user_id: str) -> None:
+        """Handle stop request from user."""
+        try:
+            # Find the stream info for this thread
+            stream_info = self.active_streams.get(thread_ts)
+            
+            if not stream_info:
+                self.bot_client.post_to_thread(
+                    ThreadInfo(channel=channel_id, thread_ts=thread_ts),
+                    "❌ このスレッドでアクティブな処理が見つかりません。"
+                )
+                return
+            
+            if not stream_info.is_running:
+                self.bot_client.post_to_thread(
+                    stream_info.thread_info,
+                    "ℹ️ 処理は既に停止しています。"
+                )
+                return
+            
+            # Show stopping message
+            self.bot_client.post_to_thread(
+                stream_info.thread_info,
+                "⏸️ 処理を停止しています..."
+            )
+            
+            logger.info(f"Stopping stream processing for thread {thread_ts} requested by {user_id}")
+            
+            # Stop the processor safely
+            self._stop_stream_processing(stream_info, user_id)
+            
+        except Exception as e:
+            logger.error(f"Error handling stop request: {e}")
+            try:
+                self.bot_client.post_to_thread(
+                    ThreadInfo(channel=channel_id, thread_ts=thread_ts),
+                    f"❌ 停止処理中にエラーが発生しました: {str(e)}"
+                )
+            except Exception:
+                pass
+    
+    def _stop_stream_processing(self, stream_info: ActiveStreamInfo, stop_user_id: str) -> None:
+        """Stop stream processing for a thread."""
+        try:
+            logger.info(f"Stopping stream processing for {stream_info.video_url}")
+            
+            # Stop the processor if running
+            if stream_info.processor and hasattr(stream_info.processor, 'stop_processing'):
+                try:
+                    stream_info.processor.stop_processing()
+                    logger.info("Successfully called stop_processing on processor")
+                except Exception as e:
+                    logger.warning(f"Error calling stop_processing: {e}")
+            
+            # Update stream status
+            stream_info.is_running = False
+            stream_info.error_message = None
+            
+            # Send confirmation message
+            self.bot_client.post_to_thread(
+                stream_info.thread_info,
+                "✅ 処理を停止しました。再開するには 'retry' と入力してください。"
+            )
+            
+            logger.info(f"Successfully stopped stream processing for thread {stream_info.thread_info.thread_ts}")
+            
+        except Exception as e:
+            logger.error(f"Failed to stop stream processing: {e}")
+            
+            # Update error state
+            stream_info.is_running = False
+            stream_info.error_message = f"Stop failed: {str(e)}"
+            
+            try:
+                self.bot_client.post_to_thread(
+                    stream_info.thread_info,
+                    f"❌ 停止処理に失敗しました: {str(e)}"
                 )
             except Exception:
                 pass

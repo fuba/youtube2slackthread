@@ -12,6 +12,7 @@ Real-time YouTube transcription to Slack threads using Voice Activity Detection 
 - **🔒 User-specific cookie management** - secure per-user authentication via DM
 - **🛡️ Encrypted storage** - AES-256 encryption for stored cookies
 - **🔄 Smart retry system** - restart failed processes with simple thread messages
+- **⏸️ Smart stop system** - safely stop active processes from threads
 
 ## Quick Start
 
@@ -125,6 +126,25 @@ The bot will:
 - ✅ Resume processing with the same URL and user settings
 - ✅ Show restart status with emoji feedback
 - ❌ Ignore if processing is already running
+
+### Stop Active Processing
+
+To stop an active transcription process, simply type in the thread:
+```
+stop
+```
+
+**Supported stop commands:**
+- `stop` - English
+- `halt` - English alternative
+- `停止` - Japanese  
+- `ストップ` - Japanese alternative
+
+The bot will:
+- ⏸️ Safely stop the current processing
+- ✅ Show confirmation when stopped
+- 💡 Suggest using 'retry' to restart
+- ❌ Show appropriate message if nothing is running
 
 ## How It Works
 
