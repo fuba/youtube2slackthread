@@ -338,6 +338,15 @@ class SlackServer:
                 'text': 'Please provide a valid YouTube URL.'
             })
         
+        # Check if user has uploaded cookies
+        if not self.workflow_config.cookie_manager.has_cookies(user_id):
+            return jsonify({
+                'response_type': 'ephemeral',
+                'text': '🔒 You need to upload your YouTube cookies first!\n\n'
+                       'Please DM me a cookies.txt file to use this feature.\n'
+                       'Export your cookies from your browser using a browser extension.'
+            })
+        
         # Start VAD stream processing
         thread = threading.Thread(
             target=self._process_simple_vad_in_background,
@@ -437,6 +446,114 @@ class SlackServer:
             if hasattr(self.workflow_config, 'cleanup_user_temp_files'):
                 self.workflow_config.cleanup_user_temp_files(user_id)
 
+    def _handle_socket_slash_command(self, command: str, channel: str, user_id: str, text: str) -> Optional[str]:
+        """Handle slash commands received via Socket Mode.
+        
+        Args:
+            command: The slash command (e.g., "/youtube2thread")
+            channel: Channel ID where command was executed
+            user_id: User ID who executed the command
+            text: Command text/parameters
+            
+        Returns:
+            Response text to send back to user (or None)
+        """
+        try:
+            logger.info(f"Received Socket Mode command: {command} from user {user_id} in channel {channel}")
+            
+            if command == '/youtube2thread':
+                # For YouTube command, we need to return response and start background process
+                if not text:
+                    return 'Please provide a YouTube URL. Usage: `/youtube2thread https://youtube.com/watch?v=...`'
+                
+                # Validate YouTube URL
+                import re
+                youtube_pattern = r'(youtube\.com|youtu\.be)'
+                if not re.search(youtube_pattern, text):
+                    return 'Please provide a valid YouTube URL.'
+                
+                # Check if user has uploaded cookies
+                if not self.workflow_config.cookie_manager.has_cookies(user_id):
+                    return ('🔒 You need to upload your YouTube cookies first!\n\n'
+                           'Please DM me a cookies.txt file to use this feature.\n'
+                           'Export your cookies from your browser using a browser extension.')
+                
+                # Start background processing
+                import threading
+                thread = threading.Thread(
+                    target=self._process_simple_vad_in_background,
+                    args=(text, channel, user_id, None)
+                )
+                thread.daemon = True
+                thread.start()
+                
+                return f'🚀 Starting VAD stream processing: {text}\nI\'ll create a thread when ready!'
+                
+            elif command == '/youtube2thread-status':
+                # Handle status command with app context
+                with self.app.app_context():
+                    response = self._handle_status_command(channel, user_id)
+                    # Extract text from JSON response for Socket Mode
+                    if isinstance(response, tuple):
+                        response_data = response[0].json
+                    else:
+                        response_data = response.json
+                    return response_data.get('text', 'Status retrieved')
+                    
+            elif command == '/youtube2thread-stop':
+                with self.app.app_context():
+                    response = self._handle_stop_command(text, channel, user_id)
+                    # Extract text from JSON response for Socket Mode
+                    if isinstance(response, tuple):
+                        response_data = response[0].json
+                    else:
+                        response_data = response.json
+                    return response_data.get('text', 'Stop command processed')
+            else:
+                return f"Unknown command: {command}"
+                
+        except Exception as e:
+            logger.error(f"Error handling Socket Mode slash command: {e}")
+            return f"Error processing command: {str(e)}"
+
+    def _handle_all_socket_events(self, client, req):
+        """Handle all socket mode events including slash commands."""
+        from slack_sdk.socket_mode.response import SocketModeResponse
+        
+        try:
+            logger.info(f"SlackServer handling Socket Mode event: type={req.type}")
+            
+            if req.type == "slash_commands":
+                # Extract command details
+                payload = req.payload
+                command = payload.get('command')
+                channel = payload.get('channel_id')
+                user_id = payload.get('user_id')
+                text = payload.get('text', '')
+                
+                logger.info(f"Processing slash command: {command} from user {user_id}")
+                
+                # Call our handler
+                response_text = self._handle_socket_slash_command(command, channel, user_id, text)
+                
+                # Send response if provided
+                if response_text:
+                    try:
+                        self.bot_client.web_client.chat_postEphemeral(
+                            channel=channel,
+                            user=user_id,
+                            text=response_text
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to send ephemeral response: {e}")
+            
+        except Exception as e:
+            logger.error(f"Error in _handle_all_socket_events: {e}")
+        finally:
+            # Always acknowledge
+            response = SocketModeResponse(envelope_id=req.envelope_id)
+            client.send_socket_mode_response(response)
+
     
     def run(self, debug: bool = False) -> None:
         """Run the Flask server.
@@ -446,11 +563,14 @@ class SlackServer:
         """
         logger.info(f"Starting Slack server on port {self.port}")
         
-        # Start Socket Mode if available (for file uploads)
+        # Start Socket Mode if available (for file uploads and slash commands)
         if self.bot_client.socket_client:
             try:
+                # Add our comprehensive event handler (handles both slash commands and file events)
+                self.bot_client.socket_client.socket_mode_request_listeners.append(self._handle_all_socket_events)
+                
                 self.bot_client.start_socket_mode()
-                logger.info("Socket Mode started for file upload support")
+                logger.info("Socket Mode started for file upload and slash command support")
             except Exception as e:
                 logger.warning(f"Failed to start Socket Mode: {e}")
         

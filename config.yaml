@@ -4,7 +4,7 @@ youtube:
   download_dir: "./downloads"        # Directory to save downloaded videos
   format: "best"                     # Video format (best, bestaudio, etc.)
   keep_video: true                   # Whether to keep video files after processing
-  cookies_file: "./cookies/youtube_cookies.txt"  # Path to cookies file (Netscape format)
+  # cookies_file: User-specific cookies are now managed via DM upload to the Slack bot
 
 whisper:
   model: "medium"                   # Whisper model (tiny, base, small, medium, large) 
