@@ -416,11 +416,6 @@ class SlackBotClient:
             raise SlackBotError("Socket Mode not available. App token required.")
         
         logger.info("Starting Socket Mode client...")
-        # Remove existing listeners to avoid duplicates
-        self.socket_client.socket_mode_request_listeners = []
-        # Add our event handler
-        self.socket_client.socket_mode_request_listeners.append(self._handle_socket_mode_events)
-        
         # Connect and start listening
         self.socket_client.connect()
         logger.info("Socket Mode client connected and listening for events")
@@ -433,14 +428,20 @@ class SlackBotClient:
     def _handle_socket_mode_events(self, client: SocketModeClient, req: SocketModeRequest):
         """Internal handler for socket mode events."""
         try:
+            logger.info(f"Received Socket Mode event: type={req.type}")
+            
             if req.type == "events_api":
                 event = req.payload.get("event", {})
                 event_type = event.get("type")
+                logger.info(f"Events API event: {event_type}")
                 
                 if event_type == "file_shared":
                     self._handle_file_shared_event(event)
                 elif event_type == "message" and event.get("files"):
                     self._handle_message_with_files(event)
+            elif req.type == "slash_commands":
+                logger.info(f"Slash command received: {req.payload}")
+                # This will be handled by the setup_slash_command_handler method
             
         except Exception as e:
             logger.error(f"Error handling socket mode event: {e}")

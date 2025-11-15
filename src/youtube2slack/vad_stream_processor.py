@@ -215,12 +215,52 @@ class VADStreamProcessor:
                 logger.info(f"Got actual stream URL: {actual_url[:100]}...")
                 return actual_url
             else:
-                logger.error(f"Failed to get stream URL: {result.stderr}")
+                error_message = result.stderr
+                logger.error(f"Failed to get stream URL: {error_message}")
+                
+                # Check for specific cookie-related errors
+                if self._is_cookie_authentication_error(error_message):
+                    raise VADStreamProcessingError(
+                        "🔒 Cookie authentication failed! Please upload fresh cookies via DM.\n"
+                        "Your YouTube cookies may have expired or are invalid."
+                    )
+                elif "Private video" in error_message:
+                    raise VADStreamProcessingError("❌ This video is private and cannot be accessed.")
+                elif "Video unavailable" in error_message:
+                    raise VADStreamProcessingError("❌ This video is unavailable.")
+                else:
+                    raise VADStreamProcessingError(f"❌ Failed to access YouTube video: {error_message}")
+                    
                 return None
                 
+        except VADStreamProcessingError:
+            # Re-raise specific errors with user-friendly messages
+            raise
         except Exception as e:
             logger.error(f"Error getting stream URL: {e}")
-            return None
+            raise VADStreamProcessingError(f"❌ Unexpected error accessing YouTube: {str(e)}")
+            
+    def _is_cookie_authentication_error(self, error_message: str) -> bool:
+        """Check if error message indicates cookie authentication failure."""
+        cookie_error_patterns = [
+            "Sign in to confirm you're not a bot",
+            "confirm you're not a bot",
+            "This helps protect our community",
+            "Unable to extract initial data",
+            "Requires authentication",
+            "Private video",
+            "Members-only content",
+            "This video is only visible to Premium members",
+            "restricted to paid members",
+            "HTTP Error 403",
+            "Forbidden",
+            "Unable to download video info"
+        ]
+        
+        for pattern in cookie_error_patterns:
+            if pattern.lower() in error_message.lower():
+                return True
+        return False
 
     def _process_continuous_audio_stream(self, process: subprocess.Popen,
                                        progress_callback: Optional[Callable[[str], None]] = None) -> None:

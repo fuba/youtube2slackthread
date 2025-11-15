@@ -404,9 +404,32 @@ class SlackServer:
                 ydl_opts['cookiefile'] = user_cookies_file
                 logger.info(f"Using user cookies for video info: {user_cookies_file}")
             
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(video_url, download=False)
-                video_title = info.get('title', 'Unknown Stream')
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(video_url, download=False)
+                    video_title = info.get('title', 'Unknown Stream')
+            except Exception as e:
+                error_msg = str(e)
+                logger.error(f"Failed to extract video info: {error_msg}")
+                
+                # Check for cookie authentication errors
+                if self._is_video_info_cookie_error(error_msg):
+                    self.bot_client.send_direct_message(
+                        channel_id,
+                        "🔒 **Cookie Authentication Failed**\n\n"
+                        "Your YouTube cookies have expired or are invalid. "
+                        "Please upload fresh cookies via DM to the bot.\n\n"
+                        "Steps:\n1. Log into YouTube in your browser\n"
+                        "2. Export cookies using a browser extension\n"
+                        "3. Send the cookies.txt file as a DM to this bot"
+                    )
+                    return
+                else:
+                    self.bot_client.send_direct_message(
+                        channel_id,
+                        f"❌ **Failed to access video**\n{error_msg}"
+                    )
+                    return
             
             thread_info = self.bot_client.create_thread(
                 channel=channel_id,
@@ -435,10 +458,18 @@ class SlackServer:
         except Exception as e:
             logger.error(f"VAD processing error: {e}")
             try:
-                self.bot_client.send_direct_message(
-                    channel_id, 
-                    f"❌ *VAD処理エラー*\n{str(e)}"
-                )
+                error_msg = str(e)
+                
+                # Check if this is a user-friendly VADStreamProcessingError
+                if "🔒 Cookie authentication failed" in error_msg or "❌" in error_msg:
+                    # Already user-friendly, send as is
+                    self.bot_client.send_direct_message(channel_id, error_msg)
+                else:
+                    # Generic error, send generic message
+                    self.bot_client.send_direct_message(
+                        channel_id, 
+                        f"❌ **Processing Error**\n{error_msg}"
+                    )
             except Exception:
                 pass
         finally:
@@ -553,6 +584,32 @@ class SlackServer:
             # Always acknowledge
             response = SocketModeResponse(envelope_id=req.envelope_id)
             client.send_socket_mode_response(response)
+
+    def _is_video_info_cookie_error(self, error_message: str) -> bool:
+        """Check if video info extraction error is due to cookie authentication failure."""
+        cookie_error_patterns = [
+            "Sign in to confirm you're not a bot",
+            "confirm you're not a bot", 
+            "This helps protect our community",
+            "Unable to extract initial data",
+            "Requires authentication",
+            "Private video",
+            "Members-only content",
+            "This video is only visible to Premium members",
+            "restricted to paid members",
+            "HTTP Error 403",
+            "Forbidden",
+            "Unable to download video info",
+            "age-restricted",
+            "requires login",
+            "please sign in",
+            "not available"
+        ]
+        
+        for pattern in cookie_error_patterns:
+            if pattern.lower() in error_message.lower():
+                return True
+        return False
 
     
     def run(self, debug: bool = False) -> None:
