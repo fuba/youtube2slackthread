@@ -36,7 +36,7 @@ class VADStreamProcessor:
 
     def __init__(self, transcriber: WhisperTranscriber,
                  vad_aggressiveness: int = 2, frame_duration_ms: int = 30, 
-                 cookies_file: Optional[str] = None):
+                 cookies_file: Optional[str] = None, user_id: Optional[str] = None):
         """Initialize VAD stream processor.
         
         Args:
@@ -44,9 +44,11 @@ class VADStreamProcessor:
             vad_aggressiveness: VAD aggressiveness level (0-3, higher = more strict)
             frame_duration_ms: Frame duration for VAD analysis (10, 20, or 30 ms)
             cookies_file: Path to Netscape-format cookies file for YouTube authentication
+            user_id: Slack user ID for user-specific processing
         """
         self.transcriber = transcriber
         self.cookies_file = cookies_file
+        self.user_id = user_id
         self.vad_aggressiveness = vad_aggressiveness
         self.frame_duration_ms = frame_duration_ms
         

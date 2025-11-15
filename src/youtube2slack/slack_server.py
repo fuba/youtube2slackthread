@@ -370,10 +370,14 @@ class SlackServer:
                 device=self.workflow_config.whisper_device
             )
             
-            # Create VAD processor (existing working implementation)
+            # Get user-specific cookies if available
+            user_cookies_file = self.workflow_config.get_cookies_file_for_user(user_id)
+            
+            # Create VAD processor with user-specific cookies
             vad_processor = VADStreamProcessor(
                 transcriber=transcriber,
-                cookies_file=self.workflow_config.youtube_cookies_file
+                cookies_file=user_cookies_file,
+                user_id=user_id
             )
             
             # Create thread first
@@ -386,10 +390,10 @@ class SlackServer:
                 }
             }
             
-            # Add cookies if available
-            if self.workflow_config.youtube_cookies_file and os.path.exists(self.workflow_config.youtube_cookies_file):
-                ydl_opts['cookiefile'] = self.workflow_config.youtube_cookies_file
-                logger.info(f"Using cookies for video info: {self.workflow_config.youtube_cookies_file}")
+            # Add cookies if available (use user-specific cookies)
+            if user_cookies_file and os.path.exists(user_cookies_file):
+                ydl_opts['cookiefile'] = user_cookies_file
+                logger.info(f"Using user cookies for video info: {user_cookies_file}")
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(video_url, download=False)
@@ -428,6 +432,10 @@ class SlackServer:
                 )
             except Exception:
                 pass
+        finally:
+            # Clean up user-specific temporary files
+            if hasattr(self.workflow_config, 'cleanup_user_temp_files'):
+                self.workflow_config.cleanup_user_temp_files(user_id)
 
     
     def run(self, debug: bool = False) -> None:

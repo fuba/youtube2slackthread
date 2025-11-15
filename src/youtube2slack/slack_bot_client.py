@@ -3,7 +3,9 @@
 import json
 import time
 import logging
-from typing import Dict, List, Optional, Any, Union
+import tempfile
+import requests
+from typing import Dict, List, Optional, Any, Union, Callable
 from dataclasses import dataclass
 
 from slack_sdk import WebClient
@@ -11,6 +13,8 @@ from slack_sdk.errors import SlackApiError
 from slack_sdk.socket_mode import SocketModeClient
 from slack_sdk.socket_mode.request import SocketModeRequest
 from slack_sdk.socket_mode.response import SocketModeResponse
+
+from .user_cookie_manager import UserCookieManager, CookieFileProcessor
 
 
 logger = logging.getLogger(__name__)
@@ -145,16 +149,18 @@ def format_video_header_blocks(title: str, url: str, duration: Optional[int] = N
 
 
 class SlackBotClient:
-    """Slack Bot client with thread support."""
+    """Slack Bot client with thread support and file handling."""
     
     def __init__(self, bot_token: str, app_token: Optional[str] = None,
-                 default_channel: Optional[str] = None):
+                 default_channel: Optional[str] = None,
+                 cookie_manager: Optional[UserCookieManager] = None):
         """Initialize Slack Bot client.
         
         Args:
             bot_token: Slack Bot User OAuth Token (starts with xoxb-)
             app_token: Slack App-Level Token for socket mode (starts with xapp-)
             default_channel: Default channel to post messages
+            cookie_manager: User cookie manager instance
             
         Raises:
             SlackBotError: If tokens are invalid
@@ -165,6 +171,10 @@ class SlackBotClient:
         self.bot_token = bot_token
         self.app_token = app_token
         self.default_channel = default_channel
+        self.cookie_manager = cookie_manager
+        
+        # File event handlers
+        self.file_handlers: Dict[str, Callable] = {}
         
         # Initialize web client
         self.web_client = WebClient(token=bot_token)
@@ -416,9 +426,202 @@ class SlackBotClient:
     
     def _handle_socket_mode_events(self, client: SocketModeClient, req: SocketModeRequest):
         """Internal handler for socket mode events."""
-        # Acknowledge all events
-        response = SocketModeResponse(envelope_id=req.envelope_id)
-        client.send_socket_mode_response(response)
+        try:
+            if req.type == "events_api":
+                event = req.payload.get("event", {})
+                event_type = event.get("type")
+                
+                if event_type == "file_shared":
+                    self._handle_file_shared_event(event)
+                elif event_type == "message" and event.get("files"):
+                    self._handle_message_with_files(event)
+            
+        except Exception as e:
+            logger.error(f"Error handling socket mode event: {e}")
+        finally:
+            # Always acknowledge events
+            response = SocketModeResponse(envelope_id=req.envelope_id)
+            client.send_socket_mode_response(response)
+    
+    def _handle_file_shared_event(self, event: Dict[str, Any]) -> None:
+        """Handle file_shared event for cookies.txt uploads."""
+        try:
+            file_id = event.get("file_id")
+            user_id = event.get("user_id")
+            channel_id = event.get("channel_id")
+            
+            if not all([file_id, user_id, channel_id]):
+                logger.warning("Missing required fields in file_shared event")
+                return
+            
+            # Check if it's a DM (channel ID starts with 'D')
+            if not channel_id.startswith('D'):
+                logger.info(f"File shared in non-DM channel {channel_id}, ignoring")
+                return
+            
+            # Get file information
+            file_info = self._get_file_info(file_id)
+            if not file_info:
+                return
+            
+            # Process the file if it's a cookies file
+            self._process_uploaded_file(file_info, user_id, channel_id)
+            
+        except Exception as e:
+            logger.error(f"Error handling file_shared event: {e}")
+    
+    def _handle_message_with_files(self, event: Dict[str, Any]) -> None:
+        """Handle message events that contain file attachments."""
+        try:
+            files = event.get("files", [])
+            user_id = event.get("user")
+            channel_id = event.get("channel")
+            
+            if not channel_id.startswith('D'):
+                return  # Only process DM files
+            
+            for file_data in files:
+                self._process_uploaded_file(file_data, user_id, channel_id)
+                
+        except Exception as e:
+            logger.error(f"Error handling message with files: {e}")
+    
+    def _get_file_info(self, file_id: str) -> Optional[Dict[str, Any]]:
+        """Get detailed file information from Slack."""
+        try:
+            response = self.web_client.files_info(file=file_id)
+            if response.get("ok"):
+                return response.get("file")
+            else:
+                logger.error(f"Failed to get file info: {response.get('error')}")
+                return None
+                
+        except SlackApiError as e:
+            logger.error(f"API error getting file info: {e.response['error']}")
+            return None
+    
+    def _process_uploaded_file(self, file_info: Dict[str, Any], user_id: str, channel_id: str) -> None:
+        """Process uploaded file for cookies management."""
+        try:
+            filename = file_info.get("name", "").lower()
+            filetype = file_info.get("filetype", "").lower()
+            mimetype = file_info.get("mimetype", "")
+            
+            # Check if it's a cookies file
+            is_cookies_file = (
+                "cookies" in filename or 
+                filename.endswith(".txt") or
+                filetype == "text" or
+                "text/plain" in mimetype
+            )
+            
+            if not is_cookies_file:
+                self._send_dm_message(
+                    channel_id,
+                    "このファイルはサポートされていません。cookies.txtファイルをアップロードしてください。"
+                )
+                return
+            
+            # Download and validate the file
+            file_content = self._download_file_content(file_info)
+            if not file_content:
+                self._send_dm_message(
+                    channel_id,
+                    "ファイルのダウンロードに失敗しました。"
+                )
+                return
+            
+            # Validate cookies format
+            if not CookieFileProcessor.validate_cookies_file(file_content):
+                self._send_dm_message(
+                    channel_id,
+                    "無効なcookiesファイル形式です。Netscape HTTP Cookieファイル形式のcookies.txtをアップロードしてください。"
+                )
+                return
+            
+            # Process and store cookies
+            if self.cookie_manager:
+                # Extract only YouTube-related cookies for security
+                youtube_cookies = CookieFileProcessor.extract_youtube_cookies(file_content)
+                
+                self.cookie_manager.store_cookies(user_id, youtube_cookies)
+                
+                self._send_dm_message(
+                    channel_id,
+                    "✅ Cookiesが正常に保存されました！これで YouTube動画の処理で あなた専用のcookiesが使用されます。"
+                )
+                
+                logger.info(f"Successfully stored cookies for user {user_id}")
+            else:
+                self._send_dm_message(
+                    channel_id,
+                    "Cookie管理システムが利用できません。"
+                )
+                
+        except Exception as e:
+            logger.error(f"Error processing uploaded file: {e}")
+            self._send_dm_message(
+                channel_id,
+                f"ファイル処理中にエラーが発生しました: {str(e)}"
+            )
+    
+    def _download_file_content(self, file_info: Dict[str, Any]) -> Optional[str]:
+        """Download file content from Slack."""
+        try:
+            download_url = file_info.get("url_private_download")
+            if not download_url:
+                logger.error("No download URL available for file")
+                return None
+            
+            headers = {
+                "Authorization": f"Bearer {self.bot_token}"
+            }
+            
+            response = requests.get(download_url, headers=headers, timeout=30)
+            response.raise_for_status()
+            
+            # Try to decode as UTF-8
+            try:
+                content = response.content.decode('utf-8')
+            except UnicodeDecodeError:
+                # Try other encodings
+                for encoding in ['utf-8-sig', 'iso-8859-1', 'cp1252']:
+                    try:
+                        content = response.content.decode(encoding)
+                        break
+                    except UnicodeDecodeError:
+                        continue
+                else:
+                    logger.error("Could not decode file content")
+                    return None
+            
+            return content
+            
+        except Exception as e:
+            logger.error(f"Error downloading file: {e}")
+            return None
+    
+    def _send_dm_message(self, channel_id: str, message: str) -> bool:
+        """Send a direct message to a user."""
+        try:
+            self.web_client.chat_postMessage(
+                channel=channel_id,
+                text=message
+            )
+            return True
+            
+        except SlackApiError as e:
+            logger.error(f"Failed to send DM: {e.response['error']}")
+            return False
+    
+    def setup_file_handler(self, file_type: str, handler: Callable) -> None:
+        """Setup custom file type handler.
+        
+        Args:
+            file_type: File type to handle (e.g., 'cookies', 'audio')
+            handler: Function to handle the file
+        """
+        self.file_handlers[file_type] = handler
     
     def get_channel_id(self, channel_name: str) -> Optional[str]:
         """Get channel ID from channel name.

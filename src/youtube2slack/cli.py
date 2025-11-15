@@ -10,6 +10,7 @@ import click
 from .workflow import WorkflowConfig
 from .slack_server import SlackServer
 from .slack_bot_client import SlackBotClient
+from .user_cookie_manager import UserCookieManager
 
 
 def setup_logging(verbose: bool = False, log_file: Optional[str] = None) -> None:
@@ -110,11 +111,25 @@ def serve(ctx, port: int, debug: bool):
         signing_secret = os.environ.get('SLACK_SIGNING_SECRET')
         default_channel = os.environ.get('SLACK_DEFAULT_CHANNEL')
         
-        # Create bot client
+        # Initialize cookie manager if encryption key is available
+        cookie_manager = None
+        encryption_key = os.environ.get('COOKIE_ENCRYPTION_KEY')
+        if encryption_key:
+            try:
+                cookie_manager = UserCookieManager(encryption_key=encryption_key)
+                config.cookie_manager = cookie_manager
+                click.echo("✅ User cookie management enabled")
+            except Exception as e:
+                click.echo(f"⚠️  Cookie manager initialization failed: {e}")
+        else:
+            click.echo("⚠️  COOKIE_ENCRYPTION_KEY not set - user cookies disabled")
+        
+        # Create bot client with cookie manager
         bot_client = SlackBotClient(
             bot_token=bot_token,
             app_token=app_token,
-            default_channel=default_channel
+            default_channel=default_channel,
+            cookie_manager=cookie_manager
         )
         
         # Create server with our config

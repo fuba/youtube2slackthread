@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Any
 import yaml
 
+from .user_cookie_manager import UserCookieManager
+
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,37 @@ class WorkflowConfig:
     slack_channel: Optional[str] = None
     include_timestamps: bool = False
     send_errors_to_slack: bool = False
+    
+    # User-specific cookie management
+    cookie_manager: Optional[UserCookieManager] = None
+    enable_user_cookies: bool = True
+    
+    def get_cookies_file_for_user(self, user_id: Optional[str] = None) -> Optional[str]:
+        """Get cookies file path for specific user.
+        
+        Args:
+            user_id: Slack user ID, if None uses default cookies
+            
+        Returns:
+            Path to cookies file or None
+        """
+        if not user_id or not self.enable_user_cookies or not self.cookie_manager:
+            return self.youtube_cookies_file
+        
+        # Try to get user-specific cookies first
+        user_cookies_path = self.cookie_manager.get_cookies_file_path(user_id)
+        if user_cookies_path:
+            logger.info(f"Using user-specific cookies for {user_id}")
+            return user_cookies_path
+        
+        # Fall back to default cookies if no user-specific cookies
+        logger.info(f"No user-specific cookies for {user_id}, using default cookies")
+        return self.youtube_cookies_file
+    
+    def cleanup_user_temp_files(self, user_id: str) -> None:
+        """Clean up temporary files for user."""
+        if self.cookie_manager:
+            self.cookie_manager.cleanup_temp_files(user_id)
     
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any]) -> 'WorkflowConfig':
