@@ -16,10 +16,11 @@ slack:
   channel: null                      # Optional channel override (e.g., "#transcripts")
   include_timestamps: false          # Include timestamps in transcription
   send_errors_to_slack: true         # Send error notifications to Slack
+  app_token: null                    # Slack App-Level Token for Socket Mode (starts with xapp-)
 
 # User-specific cookie management
 cookie_management:
   enabled: true                      # Enable user-specific cookies
-  encryption_key: "Aems2hLf-9y6JPr9Fv6RI68iOK2e4CKRo-QUsLCj7G8"  # Example key - Generate your own!
+  encryption_key: "Aems2hLf-9y6JPEnauOAN2r9Fv6RI689dcash4CKRo-QUsLCj7G8"  # Example key - Generate your own!
   database_path: "user_cookies.db"   # SQLite database path
   temp_dir: "/tmp/youtube2slack_cookies"  # Temporary directory for cookie files

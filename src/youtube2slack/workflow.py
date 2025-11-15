@@ -31,6 +31,7 @@ class WorkflowConfig:
     # Slack settings
     slack_webhook: Optional[str] = None
     slack_channel: Optional[str] = None
+    slack_app_token: Optional[str] = None
     include_timestamps: bool = False
     send_errors_to_slack: bool = False
     
@@ -109,6 +110,7 @@ class WorkflowConfig:
             # Slack settings
             slack_webhook=slack_config.get('webhook_url'),
             slack_channel=slack_config.get('channel'),
+            slack_app_token=slack_config.get('app_token'),
             include_timestamps=slack_config.get('include_timestamps', False),
             send_errors_to_slack=slack_config.get('send_errors_to_slack', False),
             

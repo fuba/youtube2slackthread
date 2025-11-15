@@ -445,6 +445,15 @@ class SlackServer:
             debug: Enable debug mode
         """
         logger.info(f"Starting Slack server on port {self.port}")
+        
+        # Start Socket Mode if available (for file uploads)
+        if self.bot_client.socket_client:
+            try:
+                self.bot_client.start_socket_mode()
+                logger.info("Socket Mode started for file upload support")
+            except Exception as e:
+                logger.warning(f"Failed to start Socket Mode: {e}")
+        
         self.app.run(host='0.0.0.0', port=self.port, debug=debug)
     
     def get_active_threads(self) -> Dict[str, ThreadInfo]:

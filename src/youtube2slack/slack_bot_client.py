@@ -416,8 +416,14 @@ class SlackBotClient:
             raise SlackBotError("Socket Mode not available. App token required.")
         
         logger.info("Starting Socket Mode client...")
+        # Remove existing listeners to avoid duplicates
+        self.socket_client.socket_mode_request_listeners = []
+        # Add our event handler
         self.socket_client.socket_mode_request_listeners.append(self._handle_socket_mode_events)
+        
+        # Connect and start listening
         self.socket_client.connect()
+        logger.info("Socket Mode client connected and listening for events")
         
     def stop_socket_mode(self) -> None:
         """Stop Socket Mode client."""

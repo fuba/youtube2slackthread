@@ -17,6 +17,9 @@ The User Cookie Management system allows:
 Edit your `config.yaml` file to enable cookie management:
 
 ```yaml
+slack:
+  app_token: "xapp-1-your-app-token"  # Required for Socket Mode file uploads
+
 # User-specific cookie management
 cookie_management:
   enabled: true                      # Enable user-specific cookies
@@ -30,16 +33,7 @@ Generate a secure encryption key:
 python -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
-### 2. Environment Variables
-
-Add the following environment variable for Socket Mode:
-
-```bash
-# Required for file uploads (Socket Mode)
-export SLACK_APP_TOKEN="xapp-1-your-app-token"
-```
-
-### 3. Slack App Configuration
+### 2. Slack App Configuration
 
 1. Enable Socket Mode in your Slack app:
    - Go to your app settings at https://api.slack.com/apps
