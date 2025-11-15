@@ -9,7 +9,8 @@ Real-time YouTube transcription to Slack threads using Voice Activity Detection 
 - **⚡ Slash command support** - use `/youtube2thread` in Slack
 - **🎤 Voice Activity Detection (VAD)** - natural sentence boundaries
 - **🚀 CUDA acceleration** - GPU-powered Whisper transcription
-- **🍪 YouTube authentication** - bypass bot detection with browser cookies
+- **🔒 User-specific cookie management** - secure per-user authentication via DM
+- **🛡️ Encrypted storage** - AES-256 encryption for stored cookies
 
 ## Quick Start
 
@@ -33,7 +34,7 @@ Edit the generated config:
 
 ```yaml
 youtube:
-  cookies_file: "./cookies/youtube_cookies.txt"
+  # User-specific cookies are now managed via DM upload
 
 whisper:
   model: "medium"
@@ -47,18 +48,26 @@ slack:
 
 1. Create Slack app at https://api.slack.com/apps
 2. Add scopes: `chat:write`, `channels:read`, `commands`
-3. Set environment variables:
+3. Enable Socket Mode in your Slack app settings
+4. Set environment variables:
 
 ```bash
 export SLACK_BOT_TOKEN="xoxb-your-token"
 export SLACK_SIGNING_SECRET="your-secret"
+export SLACK_APP_TOKEN="xapp-your-app-token"
+export COOKIE_ENCRYPTION_KEY="your-32-byte-base64-key"
 ```
 
 ### 4. Setup YouTube Cookies
 
+**Each user manages their own cookies via DM:**
+
 1. Install browser extension: [Get cookies.txt LOCALLY](https://chrome.google.com/webstore/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc)
-2. Visit YouTube and login
-3. Export cookies to `cookies/youtube_cookies.txt`
+2. Visit YouTube and login to your account
+3. Export cookies as `cookies.txt`
+4. **Send the `cookies.txt` file as a DM to your Slack bot**
+
+> 🔒 Cookies are encrypted with AES-256 and stored per-user in SQLite database
 
 ### 5. Start Server
 
@@ -67,10 +76,16 @@ uv run youtube2slack serve --port 42389
 ```
 
 Configure Slack slash command:
-- Request URL: `https://your-domain.com/slack/commands`
+- **Socket Mode**: Enable Socket Mode (no Request URL needed)
 - Command: `/youtube2thread`
+- Required scopes: `chat:write`, `channels:read`, `commands`, `files:read`
 
 ## Usage
+
+### First Time Setup
+
+1. **Upload your cookies**: DM your `cookies.txt` file to the bot
+2. **Start using**: Use slash commands in any channel
 
 ### Slash Command (Recommended)
 
@@ -78,6 +93,8 @@ In Slack:
 ```
 /youtube2thread https://www.youtube.com/watch?v=VIDEO_ID
 ```
+
+> ⚠️ **Cookie Required**: You must upload your cookies via DM before using commands
 
 ### CLI Commands
 
@@ -132,9 +149,16 @@ frame_duration_ms: 30  # 10, 20, or 30ms
 ### YouTube Bot Detection
 
 If you get "Sign in to confirm you're not a bot" errors:
-1. Ensure `cookies/youtube_cookies.txt` exists
-2. Re-export fresh cookies from your browser
-3. Check logs for "Using cookies file" message
+1. **Re-upload fresh cookies**: DM new `cookies.txt` to the bot
+2. Check logs for "Using user-specific cookies" message
+3. Ensure you're logged into YouTube in your browser before exporting
+
+### Cookie Upload Issues
+
+If cookie upload fails:
+1. Verify the file is named `cookies.txt` (Netscape format)
+2. Check the file contains YouTube cookies
+3. Ensure you're DMing the bot directly (not in a channel)
 
 ### CUDA Issues
 

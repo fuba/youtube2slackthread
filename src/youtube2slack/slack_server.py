@@ -338,6 +338,15 @@ class SlackServer:
                 'text': 'Please provide a valid YouTube URL.'
             })
         
+        # Check if user has uploaded cookies
+        if not self.workflow_config.cookie_manager.has_cookies(user_id):
+            return jsonify({
+                'response_type': 'ephemeral',
+                'text': '🔒 You need to upload your YouTube cookies first!\n\n'
+                       'Please DM me a cookies.txt file to use this feature.\n'
+                       'Export your cookies from your browser using a browser extension.'
+            })
+        
         # Start VAD stream processing
         thread = threading.Thread(
             target=self._process_simple_vad_in_background,
@@ -370,10 +379,14 @@ class SlackServer:
                 device=self.workflow_config.whisper_device
             )
             
-            # Create VAD processor (existing working implementation)
+            # Get user-specific cookies if available
+            user_cookies_file = self.workflow_config.get_cookies_file_for_user(user_id)
+            
+            # Create VAD processor with user-specific cookies
             vad_processor = VADStreamProcessor(
                 transcriber=transcriber,
-                cookies_file=self.workflow_config.youtube_cookies_file
+                cookies_file=user_cookies_file,
+                user_id=user_id
             )
             
             # Create thread first
@@ -386,14 +399,37 @@ class SlackServer:
                 }
             }
             
-            # Add cookies if available
-            if self.workflow_config.youtube_cookies_file and os.path.exists(self.workflow_config.youtube_cookies_file):
-                ydl_opts['cookiefile'] = self.workflow_config.youtube_cookies_file
-                logger.info(f"Using cookies for video info: {self.workflow_config.youtube_cookies_file}")
+            # Add cookies if available (use user-specific cookies)
+            if user_cookies_file and os.path.exists(user_cookies_file):
+                ydl_opts['cookiefile'] = user_cookies_file
+                logger.info(f"Using user cookies for video info: {user_cookies_file}")
             
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(video_url, download=False)
-                video_title = info.get('title', 'Unknown Stream')
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(video_url, download=False)
+                    video_title = info.get('title', 'Unknown Stream')
+            except Exception as e:
+                error_msg = str(e)
+                logger.error(f"Failed to extract video info: {error_msg}")
+                
+                # Check for cookie authentication errors
+                if self._is_video_info_cookie_error(error_msg):
+                    self.bot_client.send_direct_message(
+                        channel_id,
+                        "🔒 **Cookie Authentication Failed**\n\n"
+                        "Your YouTube cookies have expired or are invalid. "
+                        "Please upload fresh cookies via DM to the bot.\n\n"
+                        "Steps:\n1. Log into YouTube in your browser\n"
+                        "2. Export cookies using a browser extension\n"
+                        "3. Send the cookies.txt file as a DM to this bot"
+                    )
+                    return
+                else:
+                    self.bot_client.send_direct_message(
+                        channel_id,
+                        f"❌ **Failed to access video**\n{error_msg}"
+                    )
+                    return
             
             thread_info = self.bot_client.create_thread(
                 channel=channel_id,
@@ -422,12 +458,158 @@ class SlackServer:
         except Exception as e:
             logger.error(f"VAD processing error: {e}")
             try:
-                self.bot_client.send_direct_message(
-                    channel_id, 
-                    f"❌ *VAD処理エラー*\n{str(e)}"
-                )
+                error_msg = str(e)
+                
+                # Check if this is a user-friendly VADStreamProcessingError
+                if "🔒 Cookie authentication failed" in error_msg or "❌" in error_msg:
+                    # Already user-friendly, send as is
+                    self.bot_client.send_direct_message(channel_id, error_msg)
+                else:
+                    # Generic error, send generic message
+                    self.bot_client.send_direct_message(
+                        channel_id, 
+                        f"❌ **Processing Error**\n{error_msg}"
+                    )
             except Exception:
                 pass
+        finally:
+            # Clean up user-specific temporary files
+            if hasattr(self.workflow_config, 'cleanup_user_temp_files'):
+                self.workflow_config.cleanup_user_temp_files(user_id)
+
+    def _handle_socket_slash_command(self, command: str, channel: str, user_id: str, text: str) -> Optional[str]:
+        """Handle slash commands received via Socket Mode.
+        
+        Args:
+            command: The slash command (e.g., "/youtube2thread")
+            channel: Channel ID where command was executed
+            user_id: User ID who executed the command
+            text: Command text/parameters
+            
+        Returns:
+            Response text to send back to user (or None)
+        """
+        try:
+            logger.info(f"Received Socket Mode command: {command} from user {user_id} in channel {channel}")
+            
+            if command == '/youtube2thread':
+                # For YouTube command, we need to return response and start background process
+                if not text:
+                    return 'Please provide a YouTube URL. Usage: `/youtube2thread https://youtube.com/watch?v=...`'
+                
+                # Validate YouTube URL
+                import re
+                youtube_pattern = r'(youtube\.com|youtu\.be)'
+                if not re.search(youtube_pattern, text):
+                    return 'Please provide a valid YouTube URL.'
+                
+                # Check if user has uploaded cookies
+                if not self.workflow_config.cookie_manager.has_cookies(user_id):
+                    return ('🔒 You need to upload your YouTube cookies first!\n\n'
+                           'Please DM me a cookies.txt file to use this feature.\n'
+                           'Export your cookies from your browser using a browser extension.')
+                
+                # Start background processing
+                import threading
+                thread = threading.Thread(
+                    target=self._process_simple_vad_in_background,
+                    args=(text, channel, user_id, None)
+                )
+                thread.daemon = True
+                thread.start()
+                
+                return f'🚀 Starting VAD stream processing: {text}\nI\'ll create a thread when ready!'
+                
+            elif command == '/youtube2thread-status':
+                # Handle status command with app context
+                with self.app.app_context():
+                    response = self._handle_status_command(channel, user_id)
+                    # Extract text from JSON response for Socket Mode
+                    if isinstance(response, tuple):
+                        response_data = response[0].json
+                    else:
+                        response_data = response.json
+                    return response_data.get('text', 'Status retrieved')
+                    
+            elif command == '/youtube2thread-stop':
+                with self.app.app_context():
+                    response = self._handle_stop_command(text, channel, user_id)
+                    # Extract text from JSON response for Socket Mode
+                    if isinstance(response, tuple):
+                        response_data = response[0].json
+                    else:
+                        response_data = response.json
+                    return response_data.get('text', 'Stop command processed')
+            else:
+                return f"Unknown command: {command}"
+                
+        except Exception as e:
+            logger.error(f"Error handling Socket Mode slash command: {e}")
+            return f"Error processing command: {str(e)}"
+
+    def _handle_all_socket_events(self, client, req):
+        """Handle all socket mode events including slash commands."""
+        from slack_sdk.socket_mode.response import SocketModeResponse
+        
+        try:
+            logger.info(f"SlackServer handling Socket Mode event: type={req.type}")
+            
+            if req.type == "slash_commands":
+                # Extract command details
+                payload = req.payload
+                command = payload.get('command')
+                channel = payload.get('channel_id')
+                user_id = payload.get('user_id')
+                text = payload.get('text', '')
+                
+                logger.info(f"Processing slash command: {command} from user {user_id}")
+                
+                # Call our handler
+                response_text = self._handle_socket_slash_command(command, channel, user_id, text)
+                
+                # Send response if provided
+                if response_text:
+                    try:
+                        self.bot_client.web_client.chat_postEphemeral(
+                            channel=channel,
+                            user=user_id,
+                            text=response_text
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to send ephemeral response: {e}")
+            
+        except Exception as e:
+            logger.error(f"Error in _handle_all_socket_events: {e}")
+        finally:
+            # Always acknowledge
+            response = SocketModeResponse(envelope_id=req.envelope_id)
+            client.send_socket_mode_response(response)
+
+    def _is_video_info_cookie_error(self, error_message: str) -> bool:
+        """Check if video info extraction error is due to cookie authentication failure."""
+        cookie_error_patterns = [
+            "Sign in to confirm you're not a bot",
+            "confirm you're not a bot", 
+            "This helps protect our community",
+            "Unable to extract initial data",
+            "Requires authentication",
+            "Private video",
+            "Members-only content",
+            "This video is only visible to Premium members",
+            "restricted to paid members",
+            "HTTP Error 403",
+            "Forbidden",
+            "Unable to download video info",
+            "age-restricted",
+            "requires login",
+            "please sign in",
+            "not available"
+        ]
+        
+        for pattern in cookie_error_patterns:
+            if pattern.lower() in error_message.lower():
+                return True
+        return False
 
     
     def run(self, debug: bool = False) -> None:
@@ -437,6 +619,18 @@ class SlackServer:
             debug: Enable debug mode
         """
         logger.info(f"Starting Slack server on port {self.port}")
+        
+        # Start Socket Mode if available (for file uploads and slash commands)
+        if self.bot_client.socket_client:
+            try:
+                # Add our comprehensive event handler (handles both slash commands and file events)
+                self.bot_client.socket_client.socket_mode_request_listeners.append(self._handle_all_socket_events)
+                
+                self.bot_client.start_socket_mode()
+                logger.info("Socket Mode started for file upload and slash command support")
+            except Exception as e:
+                logger.warning(f"Failed to start Socket Mode: {e}")
+        
         self.app.run(host='0.0.0.0', port=self.port, debug=debug)
     
     def get_active_threads(self) -> Dict[str, ThreadInfo]:

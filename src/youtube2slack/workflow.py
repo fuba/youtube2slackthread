@@ -1,9 +1,12 @@
 """Main workflow orchestration module."""
 
+import os
 import logging
 from dataclasses import dataclass
 from typing import Dict, Optional, Any
 import yaml
+
+from .user_cookie_manager import UserCookieManager
 
 
 logger = logging.getLogger(__name__)
@@ -32,6 +35,37 @@ class WorkflowConfig:
     include_timestamps: bool = False
     send_errors_to_slack: bool = False
     
+    # User-specific cookie management
+    cookie_manager: Optional[UserCookieManager] = None
+    enable_user_cookies: bool = True
+    
+    def get_cookies_file_for_user(self, user_id: Optional[str] = None) -> Optional[str]:
+        """Get cookies file path for specific user.
+        
+        Args:
+            user_id: Slack user ID, if None uses default cookies
+            
+        Returns:
+            Path to cookies file or None
+        """
+        if not user_id or not self.enable_user_cookies or not self.cookie_manager:
+            return self.youtube_cookies_file
+        
+        # Try to get user-specific cookies first
+        user_cookies_path = self.cookie_manager.get_cookies_file_path(user_id)
+        if user_cookies_path:
+            logger.info(f"Using user-specific cookies for {user_id}")
+            return user_cookies_path
+        
+        # Fall back to default cookies if no user-specific cookies
+        logger.info(f"No user-specific cookies for {user_id}, using default cookies")
+        return self.youtube_cookies_file
+    
+    def cleanup_user_temp_files(self, user_id: str) -> None:
+        """Clean up temporary files for user."""
+        if self.cookie_manager:
+            self.cookie_manager.cleanup_temp_files(user_id)
+    
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any]) -> 'WorkflowConfig':
         """Create config from dictionary.
@@ -45,6 +79,18 @@ class WorkflowConfig:
         youtube_config = config_dict.get('youtube', {})
         whisper_config = config_dict.get('whisper', {})
         slack_config = config_dict.get('slack', {})
+        
+        # Initialize cookie manager from environment variable
+        cookie_manager = None
+        encryption_key = os.environ.get('COOKIE_ENCRYPTION_KEY')
+        if encryption_key:
+            try:
+                cookie_manager = UserCookieManager(
+                    db_path='user_cookies.db',
+                    encryption_key=encryption_key
+                )
+            except Exception as e:
+                logger.warning(f"Failed to initialize cookie manager: {e}")
         
         return cls(
             # YouTube settings
@@ -63,7 +109,11 @@ class WorkflowConfig:
             slack_webhook=slack_config.get('webhook_url'),
             slack_channel=slack_config.get('channel'),
             include_timestamps=slack_config.get('include_timestamps', False),
-            send_errors_to_slack=slack_config.get('send_errors_to_slack', False)
+            send_errors_to_slack=slack_config.get('send_errors_to_slack', False),
+            
+            # Cookie management settings
+            cookie_manager=cookie_manager,
+            enable_user_cookies=bool(encryption_key)  # Enable if encryption key is set
         )
     
     @classmethod
