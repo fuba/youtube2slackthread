@@ -10,7 +10,6 @@ import click
 from .workflow import WorkflowConfig
 from .slack_server import SlackServer
 from .slack_bot_client import SlackBotClient
-from .user_cookie_manager import UserCookieManager
 
 
 def setup_logging(verbose: bool = False, log_file: Optional[str] = None) -> None:
@@ -111,25 +110,20 @@ def serve(ctx, port: int, debug: bool):
         signing_secret = os.environ.get('SLACK_SIGNING_SECRET')
         default_channel = os.environ.get('SLACK_DEFAULT_CHANNEL')
         
-        # Initialize cookie manager if encryption key is available
-        cookie_manager = None
-        encryption_key = os.environ.get('COOKIE_ENCRYPTION_KEY')
-        if encryption_key:
-            try:
-                cookie_manager = UserCookieManager(encryption_key=encryption_key)
-                config.cookie_manager = cookie_manager
-                click.echo("✅ User cookie management enabled")
-            except Exception as e:
-                click.echo(f"⚠️  Cookie manager initialization failed: {e}")
+        # Cookie manager is already initialized in WorkflowConfig if configured
+        if config.cookie_manager:
+            click.echo("✅ User cookie management enabled")
+        elif config.enable_user_cookies:
+            click.echo("⚠️  Cookie management enabled but encryption key not set in config.yaml")
         else:
-            click.echo("⚠️  COOKIE_ENCRYPTION_KEY not set - user cookies disabled")
+            click.echo("ℹ️  User cookie management disabled")
         
-        # Create bot client with cookie manager
+        # Create bot client with cookie manager from config
         bot_client = SlackBotClient(
             bot_token=bot_token,
             app_token=app_token,
             default_channel=default_channel,
-            cookie_manager=cookie_manager
+            cookie_manager=config.cookie_manager
         )
         
         # Create server with our config
@@ -173,6 +167,13 @@ slack:
   channel: null                      # Optional channel override (e.g., "#transcripts")
   include_timestamps: false          # Include timestamps in transcription
   send_errors_to_slack: true         # Send error notifications to Slack
+
+# User-specific cookie management
+cookie_management:
+  enabled: true                      # Enable user-specific cookies
+  encryption_key: null               # Generate with: python -c "import secrets; print(secrets.token_urlsafe(32))"
+  database_path: "user_cookies.db"   # SQLite database path
+  temp_dir: "/tmp/youtube2slack_cookies"  # Temporary directory
 '''
     
     config_path = 'config.yaml'

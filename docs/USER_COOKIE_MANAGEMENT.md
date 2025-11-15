@@ -12,19 +12,34 @@ The User Cookie Management system allows:
 
 ## Setup
 
-### 1. Environment Variables
+### 1. Configuration
 
-Add the following environment variables:
+Edit your `config.yaml` file to enable cookie management:
+
+```yaml
+# User-specific cookie management
+cookie_management:
+  enabled: true                      # Enable user-specific cookies
+  encryption_key: "your-secure-key"  # Required - see below for generation
+  database_path: "user_cookies.db"   # SQLite database path
+  temp_dir: "/tmp/youtube2slack_cookies"  # Temporary directory
+```
+
+Generate a secure encryption key:
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+### 2. Environment Variables
+
+Add the following environment variable for Socket Mode:
 
 ```bash
-# Required for user cookie management
-export COOKIE_ENCRYPTION_KEY="your-secure-encryption-key-here"
-
 # Required for file uploads (Socket Mode)
 export SLACK_APP_TOKEN="xapp-1-your-app-token"
 ```
 
-### 2. Slack App Configuration
+### 3. Slack App Configuration
 
 1. Enable Socket Mode in your Slack app:
    - Go to your app settings at https://api.slack.com/apps
@@ -97,8 +112,9 @@ The system stores encrypted cookies in a SQLite database:
 ## Troubleshooting
 
 ### "Cookie management system not available"
-- Check that `COOKIE_ENCRYPTION_KEY` is set
+- Check that `encryption_key` is set in config.yaml
 - Verify the encryption key is valid
+- Ensure `cookie_management.enabled` is set to `true`
 
 ### "Invalid cookies file format"
 - Ensure the file is in Netscape HTTP Cookie format
