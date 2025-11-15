@@ -1,5 +1,6 @@
 """Main workflow orchestration module."""
 
+import os
 import logging
 from dataclasses import dataclass
 from typing import Dict, Optional, Any
@@ -31,7 +32,6 @@ class WorkflowConfig:
     # Slack settings
     slack_webhook: Optional[str] = None
     slack_channel: Optional[str] = None
-    slack_app_token: Optional[str] = None
     include_timestamps: bool = False
     send_errors_to_slack: bool = False
     
@@ -79,20 +79,18 @@ class WorkflowConfig:
         youtube_config = config_dict.get('youtube', {})
         whisper_config = config_dict.get('whisper', {})
         slack_config = config_dict.get('slack', {})
-        cookie_config = config_dict.get('cookie_management', {})
         
-        # Initialize cookie manager if configured
+        # Initialize cookie manager from environment variable
         cookie_manager = None
-        if cookie_config.get('enabled', False):
-            encryption_key = cookie_config.get('encryption_key')
-            if encryption_key:
-                try:
-                    cookie_manager = UserCookieManager(
-                        db_path=cookie_config.get('database_path', 'user_cookies.db'),
-                        encryption_key=encryption_key
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to initialize cookie manager: {e}")
+        encryption_key = os.environ.get('COOKIE_ENCRYPTION_KEY')
+        if encryption_key:
+            try:
+                cookie_manager = UserCookieManager(
+                    db_path='user_cookies.db',
+                    encryption_key=encryption_key
+                )
+            except Exception as e:
+                logger.warning(f"Failed to initialize cookie manager: {e}")
         
         return cls(
             # YouTube settings
@@ -110,13 +108,12 @@ class WorkflowConfig:
             # Slack settings
             slack_webhook=slack_config.get('webhook_url'),
             slack_channel=slack_config.get('channel'),
-            slack_app_token=slack_config.get('app_token'),
             include_timestamps=slack_config.get('include_timestamps', False),
             send_errors_to_slack=slack_config.get('send_errors_to_slack', False),
             
             # Cookie management settings
             cookie_manager=cookie_manager,
-            enable_user_cookies=cookie_config.get('enabled', True)
+            enable_user_cookies=bool(encryption_key)  # Enable if encryption key is set
         )
     
     @classmethod

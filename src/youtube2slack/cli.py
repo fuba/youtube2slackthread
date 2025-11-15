@@ -104,13 +104,11 @@ def serve(ctx, port: int, debug: bool):
     try:
         config: WorkflowConfig = ctx.obj['config']
         
-        # Get Slack configuration from environment and config
+        # Get Slack configuration from environment
         bot_token = os.environ.get('SLACK_BOT_TOKEN')
+        app_token = os.environ.get('SLACK_APP_TOKEN')
         signing_secret = os.environ.get('SLACK_SIGNING_SECRET')
         default_channel = os.environ.get('SLACK_DEFAULT_CHANNEL')
-        
-        # Get app_token from config first, then fall back to env var
-        app_token = config.slack_app_token or os.environ.get('SLACK_APP_TOKEN')
         
         # Cookie manager is already initialized in WorkflowConfig if configured
         if config.cookie_manager:
@@ -173,14 +171,6 @@ slack:
   channel: null                      # Optional channel override (e.g., "#transcripts")
   include_timestamps: false          # Include timestamps in transcription
   send_errors_to_slack: true         # Send error notifications to Slack
-  app_token: null                    # Slack App-Level Token for Socket Mode (starts with xapp-)
-
-# User-specific cookie management
-cookie_management:
-  enabled: true                      # Enable user-specific cookies
-  encryption_key: null               # Generate with: python -c "import secrets; print(secrets.token_urlsafe(32))"
-  database_path: "user_cookies.db"   # SQLite database path
-  temp_dir: "/tmp/youtube2slack_cookies"  # Temporary directory
 '''
     
     config_path = 'config.yaml'
@@ -197,11 +187,12 @@ cookie_management:
         click.echo("1. Edit config.yaml to set your preferences")
         click.echo("2. Set the following environment variables:")
         click.echo("   - SLACK_BOT_TOKEN")
-        click.echo("   - SLACK_SIGNING_SECRET") 
+        click.echo("   - SLACK_SIGNING_SECRET")
+        click.echo("   - SLACK_APP_TOKEN (for Socket Mode file uploads)")
         click.echo("   - SLACK_DEFAULT_CHANNEL (optional)")
-        click.echo("\n3. For user cookie management:")
-        click.echo("   - Generate encryption key: python -c \"import secrets; print(secrets.token_urlsafe(32))\"")
-        click.echo("   - Set slack.app_token in config.yaml for Socket Mode")
+        click.echo("   - COOKIE_ENCRYPTION_KEY (for user cookie management)")
+        click.echo("\n3. Generate encryption key:")
+        click.echo("   python -c \"import secrets; print(secrets.token_urlsafe(32))\"")
         
     except Exception as e:
         click.echo(f"✗ Failed to create config: {e}", err=True)
