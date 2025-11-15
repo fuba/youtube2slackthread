@@ -635,8 +635,10 @@ class SlackServer:
                 # Handle events like messages
                 event = req.payload.get("event", {})
                 event_type = event.get("type")
+                logger.info(f"Received events_api event: {event_type}")
                 
                 if event_type == "message":
+                    logger.info(f"Processing message event: {event}")
                     self._handle_message_event(event)
             
         except Exception as e:
@@ -677,37 +679,37 @@ class SlackServer:
     def _handle_retry_request(self, thread_ts: str, channel_id: str, user_id: str) -> None:
         """Handle retry request from user."""
         try:
-            # Find the stream info for this thread
+            # Check if already running
             stream_info = self.active_streams.get(thread_ts)
-            
-            if not stream_info:
-                # Check if this thread had a previous failed stream
+            if stream_info and stream_info.is_running and stream_info.processor:
                 self.bot_client.post_to_thread(
                     ThreadInfo(channel=channel_id, thread_ts=thread_ts),
-                    "❌ このスレッドでアクティブな処理が見つかりません。新しい動画処理を開始するには `/youtube2thread <URL>` を使用してください。"
+                    "ℹ️ 処理は既に実行中です。"
                 )
                 return
             
-            if stream_info.is_running and stream_info.processor:
+            # Extract video URL from thread's initial message
+            video_url = self._extract_video_url_from_thread(channel_id, thread_ts)
+            if not video_url:
                 self.bot_client.post_to_thread(
-                    stream_info.thread_info,
-                    "ℹ️ 処理は既に実行中です。"
+                    ThreadInfo(channel=channel_id, thread_ts=thread_ts),
+                    "❌ このスレッドから動画URLを取得できませんでした。新しい動画処理を開始するには `/youtube2thread <URL>` を使用してください。"
                 )
                 return
             
             # Mark as restarting
             self.bot_client.post_to_thread(
-                stream_info.thread_info,
+                ThreadInfo(channel=channel_id, thread_ts=thread_ts),
                 "🔄 処理を再開しています..."
             )
             
-            logger.info(f"Retrying stream processing for thread {thread_ts} requested by {user_id}")
+            logger.info(f"Retrying stream processing for thread {thread_ts} with URL {video_url} requested by {user_id}")
             
             # Start new processing in background thread
             import threading
             retry_thread = threading.Thread(
-                target=self._restart_stream_processing,
-                args=(stream_info, user_id)
+                target=self._start_retry_processing,
+                args=(video_url, channel_id, thread_ts, user_id)
             )
             retry_thread.daemon = True
             retry_thread.start()
@@ -799,6 +801,128 @@ class SlackServer:
                 self.bot_client.post_to_thread(
                     stream_info.thread_info,
                     f"❌ 停止処理に失敗しました: {str(e)}"
+                )
+            except Exception:
+                pass
+    
+    def _extract_video_url_from_thread(self, channel_id: str, thread_ts: str) -> Optional[str]:
+        """Extract YouTube URL from thread's initial message."""
+        try:
+            # Get the thread's initial message
+            response = self.bot_client.web_client.conversations_replies(
+                channel=channel_id,
+                ts=thread_ts,
+                limit=1  # Only get the first message
+            )
+            
+            if not response.get("ok") or not response.get("messages"):
+                return None
+            
+            initial_message = response["messages"][0]
+            
+            # Look for YouTube URL in various places
+            # 1. Check blocks for URL
+            blocks = initial_message.get("blocks", [])
+            for block in blocks:
+                if block.get("type") == "section":
+                    text_obj = block.get("text", {})
+                    if text_obj.get("type") == "mrkdwn":
+                        text = text_obj.get("text", "")
+                        # Look for <URL|text> pattern
+                        import re
+                        url_match = re.search(r'<(https?://[^|>]+)', text)
+                        if url_match and ("youtube.com" in url_match.group(1) or "youtu.be" in url_match.group(1)):
+                            return url_match.group(1)
+            
+            # 2. Check plain text for URLs
+            text = initial_message.get("text", "")
+            import re
+            youtube_patterns = [
+                r'https?://(?:www\.)?youtube\.com/watch\?v=[\w-]+',
+                r'https?://youtu\.be/[\w-]+',
+                r'https?://(?:www\.)?youtube\.com/live/[\w-]+'
+            ]
+            
+            for pattern in youtube_patterns:
+                match = re.search(pattern, text)
+                if match:
+                    return match.group(0)
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error extracting video URL from thread: {e}")
+            return None
+    
+    def _start_retry_processing(self, video_url: str, channel_id: str, thread_ts: str, user_id: str) -> None:
+        """Start new processing for retry request."""
+        try:
+            logger.info(f"Starting retry processing for {video_url}")
+            
+            # Create thread info
+            thread_info = ThreadInfo(
+                channel=channel_id,
+                thread_ts=thread_ts,
+                initial_message="Retry processing"
+            )
+            
+            # Create transcriber
+            transcriber = WhisperTranscriber(
+                model_name=self.workflow_config.whisper_model,
+                device=self.workflow_config.whisper_device
+            )
+            
+            # Get user-specific cookies if available
+            user_cookies_file = self.workflow_config.get_cookies_file_for_user(user_id)
+            
+            # Create VAD processor with user-specific cookies
+            from .vad_stream_processor import VADStreamProcessor
+            vad_processor = VADStreamProcessor(
+                transcriber=transcriber,
+                cookies_file=user_cookies_file,
+                user_id=user_id
+            )
+            
+            # Record active stream info
+            stream_info = ActiveStreamInfo(
+                thread_info=thread_info,
+                video_url=video_url,
+                user_id=user_id,
+                started_at=datetime.now(),
+                processor=vad_processor,
+                is_running=True
+            )
+            self.active_streams[thread_ts] = stream_info
+            
+            # Progress callback
+            def progress_callback(message: str):
+                if (message.strip() and 
+                    not message.startswith("Processing speech segment") and
+                    not message.startswith("Processing continuous audio stream") and
+                    not message.startswith("Starting VAD stream")):
+                    try:
+                        self.bot_client.post_to_thread(thread_info, message)
+                        logger.info(f"Posted to thread: {message[:50]}...")
+                    except Exception as e:
+                        logger.error(f"Failed to post to thread: {e}")
+            
+            # Start processing
+            vad_processor.start_stream_processing(video_url, progress_callback)
+            
+            logger.info(f"Successfully started retry processing for thread {thread_ts}")
+            
+        except Exception as e:
+            logger.error(f"Failed to start retry processing: {e}")
+            
+            # Update error state
+            if thread_ts in self.active_streams:
+                self.active_streams[thread_ts].is_running = False
+                self.active_streams[thread_ts].error_message = str(e)
+            
+            try:
+                self.bot_client.post_to_thread(
+                    ThreadInfo(channel=channel_id, thread_ts=thread_ts),
+                    f"❌ リトライに失敗しました: {str(e)}\n\n再度 'retry' と入力するか、新しいコマンドで処理を開始してください。"
                 )
             except Exception:
                 pass
