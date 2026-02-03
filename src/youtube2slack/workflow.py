@@ -107,8 +107,10 @@ class WorkflowConfig:
         encryption_key = os.environ.get('COOKIE_ENCRYPTION_KEY')
         if encryption_key:
             try:
+                # Allow DB path to be configured via environment variable
+                db_path = os.environ.get('USER_COOKIES_DB_PATH', 'user_cookies.db')
                 settings_manager = UserSettingsManager(
-                    db_path='user_cookies.db',
+                    db_path=db_path,
                     encryption_key=encryption_key
                 )
                 cookie_manager = settings_manager  # For backward compatibility

@@ -13,11 +13,12 @@ services:
       - SLACK_APP_TOKEN=${SLACK_APP_TOKEN:-}
       - SLACK_DEFAULT_CHANNEL=${SLACK_DEFAULT_CHANNEL:-}
       - COOKIE_ENCRYPTION_KEY=${COOKIE_ENCRYPTION_KEY}
+      - USER_COOKIES_DB_PATH=/app/data/user_cookies.db
     volumes:
       - ./downloads:/app/downloads
       - ./logs:/app/logs
       - ./config.yaml:/app/config.yaml:ro
-      - user_cookies:/app/user_cookies
+      - ./data:/app/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:42389/health"]
@@ -36,10 +37,11 @@ services:
       - WEB_UI_HOST=0.0.0.0
       - WEB_UI_PORT=42390
       - WEB_UI_BASE_URL=${WEB_UI_BASE_URL:-http://localhost:42390}
+      - USER_COOKIES_DB_PATH=/app/data/user_cookies.db
+      - WEB_TOKENS_DB_PATH=/app/data/web_tokens.db
     volumes:
       - ./config.yaml:/app/config.yaml:ro
-      - user_cookies:/app/user_cookies
-      - web_tokens:/app/web_tokens
+      - ./data:/app/data
     command: ["uv", "run", "youtube2slack", "web", "--host", "0.0.0.0", "--port", "42390"]
     restart: unless-stopped
     healthcheck:
@@ -48,7 +50,3 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
-
-volumes:
-  user_cookies:
-  web_tokens:

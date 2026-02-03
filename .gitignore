@@ -78,3 +78,4 @@ cookies/*.txt
 user_cookies.db
 web_tokens.db
 /tmp/youtube2slack_cookies/
+data/

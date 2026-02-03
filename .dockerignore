@@ -1,0 +1,30 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*.egg-info
+.venv
+venv
+.pytest_cache
+.coverage
+htmlcov
+
+# IDE
+.vscode
+.idea
+*.swp
+
+# Local files
+.env
+config.yaml
+downloads/
+logs/
+*.log
+*.db
+
+# Temporary files
+*.tmp
+*.temp

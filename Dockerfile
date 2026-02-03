@@ -6,6 +6,8 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     git \
     curl \
+    gcc \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv
@@ -17,17 +19,14 @@ RUN useradd -m -u 1000 app
 # Set working directory
 WORKDIR /app
 
-# Copy dependency files first for better caching
-COPY --chown=app:app pyproject.toml uv.lock ./
-
-# Install dependencies
-RUN uv sync --frozen --no-dev
-
-# Copy application files
+# Copy all application files first
 COPY --chown=app:app . .
 
 # Create necessary directories
 RUN mkdir -p downloads logs && chown -R app:app downloads logs
+
+# Install dependencies (as root for caching, then fix permissions)
+RUN uv sync --frozen --no-dev && chown -R app:app .venv
 
 # Switch to app user
 USER app

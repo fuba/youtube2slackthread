@@ -889,8 +889,9 @@ class SlackBotClient:
             from .web_token_manager import WebTokenManager
             
             # Initialize token manager
+            db_path = os.environ.get('WEB_TOKENS_DB_PATH', 'web_tokens.db')
             token_manager = WebTokenManager(
-                db_path='web_tokens.db',
+                db_path=db_path,
                 token_lifetime_hours=1
             )
             
