@@ -64,14 +64,16 @@ class TestWhisperTranscriber:
         
         return mock_model
 
+    @patch('torch.cuda.is_available')
     @patch('whisper.load_model')
-    def test_init_loads_model(self, mock_load_model):
+    def test_init_loads_model(self, mock_load_model, mock_cuda_available):
         """Test that initialization loads the Whisper model."""
         mock_model = MagicMock()
         mock_load_model.return_value = mock_model
-        
+        mock_cuda_available.return_value = False  # Force CPU mode for test
+
         transcriber = WhisperTranscriber(model_name="base")
-        
+
         mock_load_model.assert_called_once_with("base", device="cpu", download_root=None)
         assert transcriber.model == mock_model
         assert transcriber.model_name == "base"

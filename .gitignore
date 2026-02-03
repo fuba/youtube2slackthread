@@ -73,7 +73,8 @@ models/
 slack_config.json
 .slack_token
 
-# Cookies
+# Cookies and tokens
 cookies/*.txt
 user_cookies.db
+web_tokens.db
 /tmp/youtube2slack_cookies/

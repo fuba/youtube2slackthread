@@ -1,21 +1,39 @@
 """
-User-specific cookie management with encryption
+User-specific settings management with encryption (cookies, OpenAI API keys, Whisper preferences)
 """
 import os
 import sqlite3
 import base64
 import json
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Literal, List
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 import logging
+from dataclasses import dataclass, asdict
+from enum import Enum
 
 logger = logging.getLogger(__name__)
 
 
-class UserCookieManager:
-    """Manages encrypted user-specific cookies in SQLite database"""
+class WhisperService(Enum):
+    """Available Whisper transcription services"""
+    LOCAL = "local"
+    OPENAI = "openai"
+
+
+@dataclass
+class UserSettings:
+    """User configuration settings"""
+    whisper_service: WhisperService = WhisperService.LOCAL
+    openai_api_key: Optional[str] = None
+    whisper_model: str = "base"  # For local Whisper
+    whisper_language: Optional[str] = None
+    include_timestamps: bool = True
+
+
+class UserSettingsManager:
+    """Manages encrypted user-specific settings including cookies, API keys, and preferences in SQLite database"""
     
     def __init__(self, db_path: str = "user_cookies.db", encryption_key: Optional[str] = None):
         self.db_path = db_path
@@ -30,6 +48,7 @@ class UserCookieManager:
         """Create Fernet encryption instance from password"""
         password = self._encryption_key.encode()
         salt = b'youtube2slack_salt'  # In production, use random salt per user
+        
         kdf = PBKDF2HMAC(
             algorithm=hashes.SHA256(),
             length=32,
@@ -40,8 +59,9 @@ class UserCookieManager:
         return Fernet(key)
     
     def _init_database(self) -> None:
-        """Initialize SQLite database with user_cookies table"""
+        """Initialize SQLite database with user tables"""
         with sqlite3.connect(self.db_path) as conn:
+            # Create cookies table (maintain compatibility)
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS user_cookies (
                     user_id TEXT PRIMARY KEY,
@@ -50,15 +70,39 @@ class UserCookieManager:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+            
+            # Create settings table
             conn.execute('''
-                CREATE TRIGGER IF NOT EXISTS update_timestamp 
+                CREATE TABLE IF NOT EXISTS user_settings (
+                    user_id TEXT PRIMARY KEY,
+                    encrypted_settings BLOB NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Create triggers for both tables
+            conn.execute('''
+                CREATE TRIGGER IF NOT EXISTS update_cookies_timestamp 
                 AFTER UPDATE ON user_cookies
                 BEGIN
                     UPDATE user_cookies SET updated_at = CURRENT_TIMESTAMP 
                     WHERE user_id = NEW.user_id;
                 END
             ''')
+            
+            conn.execute('''
+                CREATE TRIGGER IF NOT EXISTS update_settings_timestamp 
+                AFTER UPDATE ON user_settings
+                BEGIN
+                    UPDATE user_settings SET updated_at = CURRENT_TIMESTAMP 
+                    WHERE user_id = NEW.user_id;
+                END
+            ''')
+            
             conn.commit()
+
+    # === Cookie Management Methods ===
     
     def store_cookies(self, user_id: str, cookies_content: str) -> None:
         """Store encrypted cookies for a user"""
@@ -66,28 +110,30 @@ class UserCookieManager:
             # Parse and validate cookies content
             parsed_cookies = self._parse_cookies_content(cookies_content)
             
-            # Encrypt cookies data
+            # Encrypt the cookies data
             cookies_data = {
                 'content': cookies_content,
                 'parsed': parsed_cookies,
-                'format': 'netscape'
+                'youtube_domains': self._get_youtube_domains(parsed_cookies)
             }
+            
             encrypted_data = self._fernet.encrypt(json.dumps(cookies_data).encode())
             
+            # Store in database
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute('''
                     INSERT OR REPLACE INTO user_cookies (user_id, encrypted_cookies)
                     VALUES (?, ?)
                 ''', (user_id, encrypted_data))
                 conn.commit()
-            
-            logger.info(f"Stored cookies for user {user_id}")
+                
+            logger.info(f"Successfully stored cookies for user {user_id}")
         except Exception as e:
             logger.error(f"Failed to store cookies for user {user_id}: {e}")
             raise
-    
+
     def get_cookies(self, user_id: str) -> Optional[Dict[str, Any]]:
-        """Retrieve and decrypt cookies for a user"""
+        """Get decrypted cookies data for a user"""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.execute(
@@ -99,37 +145,37 @@ class UserCookieManager:
                 if not row:
                     return None
                 
-                # Decrypt and return cookies data
+                # Decrypt the data
                 decrypted_data = self._fernet.decrypt(row[0])
-                cookies_data = json.loads(decrypted_data.decode())
+                return json.loads(decrypted_data.decode())
                 
-                logger.info(f"Retrieved cookies for user {user_id}")
-                return cookies_data
         except Exception as e:
             logger.error(f"Failed to retrieve cookies for user {user_id}: {e}")
             return None
-    
+
     def get_cookies_file_path(self, user_id: str) -> Optional[str]:
-        """Create temporary cookies file for user and return path"""
+        """Get temporary cookies file path for yt-dlp"""
         cookies_data = self.get_cookies(user_id)
         if not cookies_data:
             return None
         
-        # Create user-specific temporary cookies file
+        # Create temporary cookies file
         temp_dir = "/tmp/youtube2slack_cookies"
         os.makedirs(temp_dir, exist_ok=True)
         
         cookies_file = os.path.join(temp_dir, f"cookies_{user_id}.txt")
         
-        with open(cookies_file, 'w') as f:
-            f.write(cookies_data['content'])
-        
-        # Set restrictive permissions
-        os.chmod(cookies_file, 0o600)
-        
-        logger.info(f"Created temporary cookies file for user {user_id}: {cookies_file}")
-        return cookies_file
-    
+        try:
+            with open(cookies_file, 'w') as f:
+                f.write(cookies_data['content'])
+            
+            logger.info(f"Created temporary cookies file for user {user_id}")
+            return cookies_file
+            
+        except Exception as e:
+            logger.error(f"Failed to create cookies file for user {user_id}: {e}")
+            return None
+
     def delete_cookies(self, user_id: str) -> bool:
         """Delete cookies for a user"""
         try:
@@ -146,12 +192,13 @@ class UserCookieManager:
                 else:
                     logger.warning(f"No cookies found for user {user_id}")
                     return False
+                    
         except Exception as e:
             logger.error(f"Failed to delete cookies for user {user_id}: {e}")
             return False
-    
+
     def has_cookies(self, user_id: str) -> bool:
-        """Check if user has stored cookies"""
+        """Check if user has cookies stored"""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.execute(
@@ -162,6 +209,119 @@ class UserCookieManager:
         except Exception as e:
             logger.error(f"Failed to check cookies for user {user_id}: {e}")
             return False
+    
+    def cleanup_temp_files(self, user_id: str) -> None:
+        """Clean up temporary cookies files for user"""
+        temp_dir = "/tmp/youtube2slack_cookies"
+        cookies_file = os.path.join(temp_dir, f"cookies_{user_id}.txt")
+        
+        try:
+            if os.path.exists(cookies_file):
+                os.remove(cookies_file)
+                logger.info(f"Cleaned up temporary cookies file for user {user_id}")
+        except Exception as e:
+            logger.error(f"Failed to cleanup cookies file for user {user_id}: {e}")
+
+    # === Settings Management Methods ===
+    
+    def store_settings(self, user_id: str, settings: UserSettings) -> None:
+        """Store encrypted user settings"""
+        try:
+            settings_data = asdict(settings)
+            # Convert enum to string for JSON serialization
+            if isinstance(settings_data['whisper_service'], WhisperService):
+                settings_data['whisper_service'] = settings_data['whisper_service'].value
+            
+            encrypted_data = self._fernet.encrypt(json.dumps(settings_data).encode())
+            
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute('''
+                    INSERT OR REPLACE INTO user_settings (user_id, encrypted_settings)
+                    VALUES (?, ?)
+                ''', (user_id, encrypted_data))
+                conn.commit()
+            
+            logger.info(f"Stored settings for user {user_id}")
+        except Exception as e:
+            logger.error(f"Failed to store settings for user {user_id}: {e}")
+            raise
+    
+    def get_settings(self, user_id: str) -> UserSettings:
+        """Retrieve and decrypt user settings, return defaults if not found"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute(
+                    'SELECT encrypted_settings FROM user_settings WHERE user_id = ?',
+                    (user_id,)
+                )
+                row = cursor.fetchone()
+                
+                if not row:
+                    # Return default settings
+                    logger.info(f"No settings found for user {user_id}, returning defaults")
+                    return UserSettings()
+                
+                # Decrypt and return settings
+                decrypted_data = self._fernet.decrypt(row[0])
+                settings_data = json.loads(decrypted_data.decode())
+                
+                # Convert string back to enum
+                if 'whisper_service' in settings_data:
+                    settings_data['whisper_service'] = WhisperService(settings_data['whisper_service'])
+                
+                logger.info(f"Retrieved settings for user {user_id}")
+                return UserSettings(**settings_data)
+                
+        except Exception as e:
+            logger.error(f"Failed to retrieve settings for user {user_id}: {e}")
+            return UserSettings()  # Return defaults on error
+    
+    def update_whisper_service(self, user_id: str, service: WhisperService) -> None:
+        """Update user's preferred Whisper service"""
+        settings = self.get_settings(user_id)
+        settings.whisper_service = service
+        self.store_settings(user_id, settings)
+    
+    def update_openai_api_key(self, user_id: str, api_key: str) -> None:
+        """Update user's OpenAI API key"""
+        settings = self.get_settings(user_id)
+        settings.openai_api_key = api_key
+        # Auto-switch to OpenAI service when API key is set
+        settings.whisper_service = WhisperService.OPENAI
+        self.store_settings(user_id, settings)
+    
+    def update_whisper_model(self, user_id: str, model: str) -> None:
+        """Update user's preferred Whisper model (for local Whisper)"""
+        settings = self.get_settings(user_id)
+        settings.whisper_model = model
+        self.store_settings(user_id, settings)
+    
+    def delete_settings(self, user_id: str) -> bool:
+        """Delete all settings for a user"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute(
+                    'DELETE FROM user_settings WHERE user_id = ?',
+                    (user_id,)
+                )
+                conn.commit()
+                
+                if cursor.rowcount > 0:
+                    logger.info(f"Deleted settings for user {user_id}")
+                    return True
+                else:
+                    logger.warning(f"No settings found for user {user_id}")
+                    return False
+        except Exception as e:
+            logger.error(f"Failed to delete settings for user {user_id}: {e}")
+            return False
+    
+    def has_openai_api_key(self, user_id: str) -> bool:
+        """Check if user has a valid OpenAI API key"""
+        settings = self.get_settings(user_id)
+        return settings.openai_api_key is not None and len(settings.openai_api_key.strip()) > 0
+    
+    # === Helper Methods ===
     
     def _parse_cookies_content(self, content: str) -> Dict[str, str]:
         """Parse Netscape cookies format and extract key information"""
@@ -185,18 +345,16 @@ class UserCookieManager:
                 }
         
         return cookies
-    
-    def cleanup_temp_files(self, user_id: str) -> None:
-        """Clean up temporary cookies files for user"""
-        temp_dir = "/tmp/youtube2slack_cookies"
-        cookies_file = os.path.join(temp_dir, f"cookies_{user_id}.txt")
-        
-        try:
-            if os.path.exists(cookies_file):
-                os.remove(cookies_file)
-                logger.info(f"Cleaned up temporary cookies file for user {user_id}")
-        except Exception as e:
-            logger.error(f"Failed to cleanup cookies file for user {user_id}: {e}")
+
+    def _get_youtube_domains(self, cookies: Dict[str, Any]) -> List[str]:
+        """Extract YouTube related domains from cookies"""
+        domains = set()
+        for cookie_data in cookies.values():
+            if isinstance(cookie_data, dict) and 'domain' in cookie_data:
+                domain = cookie_data['domain']
+                if any(yt_domain in domain.lower() for yt_domain in ['youtube', 'google', 'gstatic']):
+                    domains.add(domain)
+        return list(domains)
 
 
 class CookieFileProcessor:
@@ -253,3 +411,7 @@ class CookieFileProcessor:
                     youtube_lines.append(line)
         
         return '\n'.join(youtube_lines)
+
+
+# Maintain backward compatibility
+UserCookieManager = UserSettingsManager

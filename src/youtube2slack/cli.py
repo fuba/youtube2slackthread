@@ -151,6 +151,72 @@ def serve(ctx, port: int, debug: bool):
 
 
 @cli.command()
+@click.option('--host', default='127.0.0.1', help='Web UI host (default: 127.0.0.1)')
+@click.option('--port', '-p', default=42390, help='Web UI port (default: 42390)')
+@click.option('--debug', is_flag=True, help='Enable debug mode')
+@click.pass_context
+def web(ctx, host: str, port: int, debug: bool):
+    """Start secure web UI server for settings management."""
+    
+    # Check required environment variables
+    required_env_vars = ['COOKIE_ENCRYPTION_KEY']
+    missing_vars = [var for var in required_env_vars if not os.environ.get(var)]
+    
+    if missing_vars:
+        click.echo("Error: Missing required environment variables:", err=True)
+        for var in missing_vars:
+            click.echo(f"  - {var}", err=True)
+        click.echo("\nCOOKIE_ENCRYPTION_KEY is required for secure settings storage.", err=True)
+        sys.exit(1)
+    
+    try:
+        config: WorkflowConfig = ctx.obj['config']
+        
+        # Initialize settings manager
+        if not config.settings_manager:
+            click.echo("❌ Settings manager not initialized. Please check your configuration.", err=True)
+            sys.exit(1)
+        
+        # Import web UI components
+        from .web_ui import SecureWebUI
+        from .web_token_manager import WebTokenManager
+        
+        # Initialize token manager
+        token_manager = WebTokenManager(
+            db_path='web_tokens.db',
+            token_lifetime_hours=1
+        )
+        
+        # Create web UI
+        web_ui = SecureWebUI(
+            settings_manager=config.settings_manager,
+            token_manager=token_manager,
+            workflow_config=config
+        )
+        
+        click.echo(f"🌐 Starting secure web UI on http://{host}:{port}")
+        click.echo("📋 Users can request access URLs via Slack DM: /web-settings")
+        click.echo("🔒 All access URLs are temporary and secure")
+        
+        # Set environment variables for URL generation
+        os.environ['WEB_UI_HOST'] = host
+        os.environ['WEB_UI_PORT'] = str(port)
+        if host != '127.0.0.1':
+            os.environ['WEB_UI_BASE_URL'] = f"http://{host}:{port}"
+        
+        # Start web UI server
+        web_ui.run(host=host, port=port, debug=debug)
+        
+    except KeyboardInterrupt:
+        click.echo("\n🛑 Web UI server stopped by user")
+        
+    except Exception as e:
+        logger.error(f"Web UI server error: {e}")
+        click.echo(f"❌ Web UI server error: {e}", err=True)
+        sys.exit(1)
+
+
+@cli.command()
 def create_config():
     """Create a sample configuration file."""
     

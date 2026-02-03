@@ -15,6 +15,7 @@ authors = [
 dependencies = [
     "yt-dlp>=2023.12.30",
     "openai-whisper>=20231117",
+    "openai>=1.0.0",
     "slack-sdk>=3.26.0",
     "click>=8.1.7",
     "pyyaml>=6.0.1",
@@ -71,8 +72,13 @@ target-version = ['py38']
 
 [tool.pytest.ini_options]
 minversion = "6.0"
-addopts = "-ra -q --strict-markers"
+addopts = "-ra -q --strict-markers --tb=short"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests"
+]

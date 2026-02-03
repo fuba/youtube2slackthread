@@ -122,6 +122,33 @@ youtube2slack serve --debug
 - Explore VAD streaming for live content
 - Add the bot to more channels
 
+## ⚙️ Advanced Configuration
+
+### Local Whisper Access Restriction
+
+You can restrict local Whisper usage to specific users in `config.yaml`:
+
+```yaml
+whisper:
+  model: "medium"
+  device: "cuda"
+  allowed_local_users:              # Slack User IDs allowed to use local Whisper
+    - "U1234567890"                 # Replace with actual Slack User IDs
+    - "U0987654321" 
+  # If allowed_local_users is empty or null, all users can use local Whisper
+  # If specified, only listed users can use local Whisper (others must use OpenAI API)
+```
+
+**To find Slack User IDs:**
+1. Go to user's profile in Slack
+2. Click "More" → "Copy member ID"
+3. Add the ID to `allowed_local_users` list
+
+**Note:** Users without local Whisper access must set up OpenAI API keys via DM:
+```
+/set-openai-key sk-your-api-key-here
+```
+
 ## 🆘 Need Help?
 
 - Check the main README.md for detailed documentation

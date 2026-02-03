@@ -13,7 +13,7 @@ from slack_sdk.signature import SignatureVerifier
 
 from .workflow import WorkflowConfig
 from .slack_bot_client import SlackBotClient, ThreadInfo, SlackBotError
-from .whisper_transcriber import WhisperTranscriber
+from .whisper_transcriber import WhisperTranscriber, TranscriberFactory
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -391,11 +391,9 @@ class SlackServer:
         try:
             from .vad_stream_processor import VADStreamProcessor
             
-            # Create transcriber
-            transcriber = WhisperTranscriber(
-                model_name=self.workflow_config.whisper_model,
-                device=self.workflow_config.whisper_device
-            )
+            # Create transcriber based on user settings
+            user_settings = self.workflow_config.settings_manager.get_settings(user_id)
+            transcriber = TranscriberFactory.create_transcriber(user_settings, self.workflow_config, user_id)
             
             # Get user-specific cookies if available
             user_cookies_file = self.workflow_config.get_cookies_file_for_user(user_id)
@@ -866,11 +864,9 @@ class SlackServer:
                 initial_message="Retry processing"
             )
             
-            # Create transcriber
-            transcriber = WhisperTranscriber(
-                model_name=self.workflow_config.whisper_model,
-                device=self.workflow_config.whisper_device
-            )
+            # Create transcriber based on user settings
+            user_settings = self.workflow_config.settings_manager.get_settings(user_id)
+            transcriber = TranscriberFactory.create_transcriber(user_settings, self.workflow_config, user_id)
             
             # Get user-specific cookies if available
             user_cookies_file = self.workflow_config.get_cookies_file_for_user(user_id)
@@ -947,11 +943,9 @@ class SlackServer:
             # Use same logic as original processing
             from .vad_stream_processor import VADStreamProcessor
             
-            # Create transcriber
-            transcriber = WhisperTranscriber(
-                model_name=self.workflow_config.whisper_model,
-                device=self.workflow_config.whisper_device
-            )
+            # Create transcriber based on user settings
+            user_settings = self.workflow_config.settings_manager.get_settings(stream_info.user_id)
+            transcriber = TranscriberFactory.create_transcriber(user_settings, self.workflow_config)
             
             # Get user-specific cookies if available
             user_cookies_file = self.workflow_config.get_cookies_file_for_user(stream_info.user_id)
@@ -1094,11 +1088,12 @@ def create_slack_server(config_path: Optional[str] = None, port: int = 42389) ->
     if not signing_secret:
         raise ValueError("SLACK_SIGNING_SECRET environment variable is required")
     
-    # Create bot client
+    # Create bot client with settings manager
     bot_client = SlackBotClient(
         bot_token=bot_token,
         app_token=app_token,
-        default_channel=default_channel
+        default_channel=default_channel,
+        settings_manager=workflow_config.settings_manager
     )
     
     # Create server

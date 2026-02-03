@@ -9,6 +9,11 @@ whisper:
   model: "base"                      # Whisper model (tiny, base, small, medium, large)
   device: null                       # Device to use (cpu, cuda, or null for auto)
   language: null                     # Language code (en, ja, etc. or null for auto-detect)
+  allowed_local_users:              # Slack User IDs allowed to use local Whisper
+    # - "U1234567890"               # Example user ID (replace with actual user IDs)
+    # - "U0987654321"               # Add more user IDs as needed
+  # If allowed_local_users is empty or null, all users can use local Whisper
+  # If specified, only listed users can use local Whisper (others must use OpenAI API)
 
 slack:
   webhook_url: "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"

@@ -9,6 +9,12 @@ import logging
 
 import whisper
 import torch
+try:
+    import openai
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+    openai = None
 
 
 logger = logging.getLogger(__name__)
@@ -16,6 +22,11 @@ logger = logging.getLogger(__name__)
 
 class TranscriptionError(Exception):
     """Exception raised for transcription failures."""
+    pass
+
+
+class OpenAITranscriptionError(TranscriptionError):
+    """Exception raised for OpenAI API transcription failures."""
     pass
 
 
@@ -315,3 +326,259 @@ class WhisperTranscriber:
             'n_audio_head': self.model.dims.n_audio_head,
             'n_audio_layer': self.model.dims.n_audio_layer,
         }
+
+
+class OpenAIWhisperTranscriber:
+    """Transcribe audio using OpenAI Whisper API."""
+
+    def __init__(self, api_key: str, model: str = "whisper-1"):
+        """Initialize the OpenAI Whisper transcriber.
+        
+        Args:
+            api_key: OpenAI API key
+            model: OpenAI Whisper model name (whisper-1)
+        """
+        if not OPENAI_AVAILABLE:
+            raise OpenAITranscriptionError("OpenAI library is not available. Please install openai>=1.0.0")
+        
+        if not api_key:
+            raise OpenAITranscriptionError("OpenAI API key is required")
+        
+        self.client = openai.OpenAI(api_key=api_key)
+        self.model = model
+        
+        logger.info(f"Initialized OpenAI Whisper transcriber with model '{model}'")
+
+    def transcribe(self, audio_path: str, language: Optional[str] = None,
+                  include_timestamps: bool = True,
+                  progress_callback: Optional[Callable[[float], None]] = None) -> Dict[str, Any]:
+        """Transcribe audio file using OpenAI API.
+        
+        Args:
+            audio_path: Path to audio file
+            language: Language code (e.g., 'en', 'ja') or None for auto-detect
+            include_timestamps: Whether to include timestamp information (limited support in API)
+            progress_callback: Optional callback for progress updates (not used for API)
+            
+        Returns:
+            Dictionary with transcription results
+            
+        Raises:
+            OpenAITranscriptionError: If transcription fails
+        """
+        if not os.path.exists(audio_path):
+            raise OpenAITranscriptionError(f"Audio file not found: {audio_path}")
+
+        try:
+            logger.info(f"Starting OpenAI transcription of {audio_path}")
+            
+            # Check file size (OpenAI limit is 25MB)
+            file_size = os.path.getsize(audio_path)
+            if file_size > 25 * 1024 * 1024:  # 25MB
+                raise OpenAITranscriptionError(f"File too large: {file_size / (1024*1024):.1f}MB (max: 25MB)")
+            
+            # Prepare transcription options
+            transcribe_params = {
+                'model': self.model,
+                'response_format': 'verbose_json' if include_timestamps else 'text',
+            }
+            
+            if language:
+                transcribe_params['language'] = language
+            
+            # Open and transcribe file
+            with open(audio_path, 'rb') as audio_file:
+                result = self.client.audio.transcriptions.create(
+                    file=audio_file,
+                    **transcribe_params
+                )
+            
+            # Format result based on response format
+            if include_timestamps and hasattr(result, 'segments'):
+                # Verbose JSON format with segments
+                formatted_result = {
+                    'text': result.text.strip(),
+                    'language': getattr(result, 'language', 'unknown'),
+                    'segments': []
+                }
+                
+                # Format segments if available
+                if hasattr(result, 'segments') and result.segments:
+                    for segment in result.segments:
+                        formatted_result['segments'].append({
+                            'start': segment.get('start', 0),
+                            'end': segment.get('end', 0),
+                            'text': segment.get('text', '').strip(),
+                            'start_formatted': format_timestamp(segment.get('start', 0)),
+                            'end_formatted': format_timestamp(segment.get('end', 0))
+                        })
+                    
+                    # Add timing information
+                    if formatted_result['segments']:
+                        total_duration = formatted_result['segments'][-1]['end']
+                        formatted_result['timing'] = {
+                            'duration': total_duration,
+                            'duration_formatted': format_timestamp(total_duration)
+                        }
+                
+            else:
+                # Simple text format
+                formatted_result = {
+                    'text': result if isinstance(result, str) else result.text.strip(),
+                    'language': 'unknown',  # API doesn't return language in text mode
+                    'segments': []
+                }
+            
+            logger.info(f"OpenAI transcription completed. Language: {formatted_result['language']}")
+            return formatted_result
+            
+        except openai.OpenAIError as e:
+            logger.error(f"OpenAI API error: {e}")
+            raise OpenAITranscriptionError(f"OpenAI API error: {e}")
+        except Exception as e:
+            logger.error(f"OpenAI transcription failed: {e}")
+            raise OpenAITranscriptionError(f"Transcription failed: {e}")
+
+    def transcribe_video(self, video_path: str, language: Optional[str] = None,
+                        include_timestamps: bool = True,
+                        cleanup_audio: bool = True,
+                        progress_callback: Optional[Callable[[float], None]] = None) -> Dict[str, Any]:
+        """Transcribe video file by extracting audio first.
+        
+        Args:
+            video_path: Path to video file
+            language: Language code or None for auto-detect
+            include_timestamps: Whether to include timestamp information
+            cleanup_audio: Whether to delete extracted audio after transcription
+            progress_callback: Optional callback for progress updates
+            
+        Returns:
+            Dictionary with transcription results
+        """
+        # Use local Whisper's audio extraction since it's already implemented
+        local_transcriber = WhisperTranscriber("base")  # Dummy model for audio extraction
+        audio_path = None
+        
+        try:
+            # Extract audio
+            audio_path = local_transcriber.extract_audio(video_path)
+            
+            # Transcribe with OpenAI
+            result = self.transcribe(
+                audio_path, 
+                language=language,
+                include_timestamps=include_timestamps,
+                progress_callback=progress_callback
+            )
+            
+            # Add video information
+            result['video_path'] = video_path
+            
+            return result
+            
+        finally:
+            # Cleanup if requested
+            if cleanup_audio and audio_path and os.path.exists(audio_path):
+                try:
+                    os.remove(audio_path)
+                    logger.info(f"Cleaned up temporary audio file: {audio_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to cleanup audio file: {e}")
+
+    def get_model_info(self) -> Dict[str, Any]:
+        """Get information about the OpenAI model.
+        
+        Returns:
+            Dictionary with model information
+        """
+        return {
+            'model_name': self.model,
+            'service': 'openai',
+            'api_based': True,
+            'max_file_size_mb': 25,
+        }
+
+
+class TranscriberFactory:
+    """Factory class to create appropriate transcriber based on user settings."""
+    
+    @staticmethod
+    def create_transcriber(user_settings, fallback_config=None, user_id=None):
+        """Create transcriber instance based on user settings.
+        
+        Args:
+            user_settings: UserSettings object from user_cookie_manager
+            fallback_config: Optional fallback configuration for local Whisper
+            user_id: User ID for permission checking
+            
+        Returns:
+            WhisperTranscriber or OpenAIWhisperTranscriber instance
+            
+        Raises:
+            TranscriptionError: If configuration is invalid
+        """
+        # Import here to avoid circular imports
+        try:
+            from .user_cookie_manager import WhisperService
+        except ImportError:
+            # Fallback for testing or standalone usage
+            from enum import Enum
+            class WhisperService(Enum):
+                LOCAL = "local"
+                OPENAI = "openai"
+        
+        # Check local Whisper permissions
+        local_whisper_allowed = True
+        if fallback_config and hasattr(fallback_config, 'is_local_whisper_allowed') and user_id:
+            local_whisper_allowed = fallback_config.is_local_whisper_allowed(user_id)
+        
+        if user_settings.whisper_service == WhisperService.OPENAI:
+            # Try OpenAI API transcriber
+            if not user_settings.openai_api_key:
+                if local_whisper_allowed:
+                    logger.warning("OpenAI service selected but no API key found, falling back to local Whisper")
+                    return TranscriberFactory._create_local_transcriber(user_settings, fallback_config)
+                else:
+                    logger.error("OpenAI service selected but no API key found, and local Whisper not allowed for this user")
+                    raise TranscriptionError("OpenAI API key required. Local Whisper access restricted for this user.")
+            
+            try:
+                return OpenAIWhisperTranscriber(
+                    api_key=user_settings.openai_api_key,
+                    model="whisper-1"
+                )
+            except OpenAITranscriptionError as e:
+                if local_whisper_allowed:
+                    logger.warning(f"Failed to create OpenAI transcriber: {e}, falling back to local Whisper")
+                    return TranscriberFactory._create_local_transcriber(user_settings, fallback_config)
+                else:
+                    logger.error(f"Failed to create OpenAI transcriber: {e}, and local Whisper not allowed for this user")
+                    raise TranscriptionError(f"OpenAI API failed: {e}. Local Whisper access restricted for this user.")
+        
+        else:
+            # User wants local Whisper - check permissions
+            if not local_whisper_allowed:
+                logger.warning(f"User {user_id} attempted to use local Whisper but is not authorized")
+                raise TranscriptionError("Local Whisper access restricted. Please set up OpenAI API key with '/set-openai-key' command.")
+            
+            # Use local Whisper
+            return TranscriberFactory._create_local_transcriber(user_settings, fallback_config)
+    
+    @staticmethod
+    def _create_local_transcriber(user_settings, fallback_config):
+        """Create local WhisperTranscriber instance."""
+        # Use user's preferred model or fallback
+        model_name = user_settings.whisper_model if user_settings.whisper_model else "base"
+        
+        # Use fallback config if available
+        device = None
+        download_root = None
+        if fallback_config:
+            device = getattr(fallback_config, 'whisper_device', None)
+            download_root = getattr(fallback_config, 'whisper_download_root', None)
+        
+        return WhisperTranscriber(
+            model_name=model_name,
+            device=device,
+            download_root=download_root
+        )

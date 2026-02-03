@@ -14,7 +14,7 @@ from slack_sdk.socket_mode import SocketModeClient
 from slack_sdk.socket_mode.request import SocketModeRequest
 from slack_sdk.socket_mode.response import SocketModeResponse
 
-from .user_cookie_manager import UserCookieManager, CookieFileProcessor
+from .user_cookie_manager import UserSettingsManager, UserCookieManager, CookieFileProcessor, WhisperService
 
 
 logger = logging.getLogger(__name__)
@@ -153,14 +153,16 @@ class SlackBotClient:
     
     def __init__(self, bot_token: str, app_token: Optional[str] = None,
                  default_channel: Optional[str] = None,
-                 cookie_manager: Optional[UserCookieManager] = None):
+                 cookie_manager: Optional[UserCookieManager] = None,
+                 settings_manager: Optional[UserSettingsManager] = None):
         """Initialize Slack Bot client.
         
         Args:
             bot_token: Slack Bot User OAuth Token (starts with xoxb-)
             app_token: Slack App-Level Token for socket mode (starts with xapp-)
             default_channel: Default channel to post messages
-            cookie_manager: User cookie manager instance
+            cookie_manager: User cookie manager instance (deprecated, use settings_manager)
+            settings_manager: User settings manager instance
             
         Raises:
             SlackBotError: If tokens are invalid
@@ -171,7 +173,10 @@ class SlackBotClient:
         self.bot_token = bot_token
         self.app_token = app_token
         self.default_channel = default_channel
-        self.cookie_manager = cookie_manager
+        
+        # Support both old cookie_manager and new settings_manager for compatibility
+        self.settings_manager = settings_manager or cookie_manager or UserSettingsManager()
+        self.cookie_manager = self.settings_manager  # Backward compatibility
         
         # File event handlers
         self.file_handlers: Dict[str, Callable] = {}
@@ -439,6 +444,8 @@ class SlackBotClient:
                     self._handle_file_shared_event(event)
                 elif event_type == "message" and event.get("files"):
                     self._handle_message_with_files(event)
+                elif event_type == "message":
+                    self._handle_dm_text_message(event)
             elif req.type == "slash_commands":
                 logger.info(f"Slash command received: {req.payload}")
                 # This will be handled by the setup_slash_command_handler method
@@ -655,3 +662,277 @@ class SlackBotClient:
         except SlackApiError as e:
             logger.error(f"Failed to get channel ID: {e.response['error']}")
             return None
+
+    # === DM Text Message Handling ===
+    
+    def _handle_dm_text_message(self, event: Dict[str, Any]) -> None:
+        """Handle DM text messages for settings commands."""
+        try:
+            channel_id = event.get("channel")
+            user_id = event.get("user")
+            text = event.get("text", "").strip()
+            
+            # Only process DMs (channel ID starts with 'D')
+            if not channel_id or not channel_id.startswith('D'):
+                return
+            
+            # Ignore bot messages and empty messages
+            if event.get("bot_id") or not text or not user_id:
+                return
+            
+            logger.info(f"Processing DM command from user {user_id}: '{text}'")
+            
+            # Parse and handle command
+            self._process_dm_command(channel_id, user_id, text)
+            
+        except Exception as e:
+            logger.error(f"Error handling DM text message: {e}")
+    
+    def _process_dm_command(self, channel_id: str, user_id: str, text: str) -> None:
+        """Process DM command and send response."""
+        try:
+            # Split command and arguments
+            parts = text.split(None, 1)
+            command = parts[0].lower() if parts else ""
+            args = parts[1] if len(parts) > 1 else ""
+            
+            # Handle different commands
+            if command in ['/help', 'help', 'ヘルプ']:
+                self._handle_help_command(channel_id)
+            elif command in ['/show-settings', '/settings', '設定確認', '設定表示']:
+                self._handle_show_settings_command(channel_id, user_id)
+            elif command in ['/set-openai-key', 'set-openai-key']:
+                self._handle_set_openai_key_command(channel_id, user_id, args)
+            elif command in ['/set-whisper', 'set-whisper']:
+                self._handle_set_whisper_command(channel_id, user_id, args)
+            elif command in ['/set-model', 'set-model']:
+                self._handle_set_model_command(channel_id, user_id, args)
+            elif command in ['/web-settings', 'web-settings', 'ウェブ設定']:
+                self._handle_web_settings_command(channel_id, user_id)
+            else:
+                # Unknown command
+                self._send_dm_message(channel_id, 
+                    "❓ **利用可能なコマンド**\n\n"
+                    "• `/help` - このヘルプを表示\n"
+                    "• `/show-settings` - 現在の設定を表示\n"
+                    "• `/set-openai-key <API_KEY>` - OpenAI APIキーを設定\n"
+                    "• `/set-whisper local|openai` - Whisperサービスを選択\n"
+                    "• `/set-model <MODEL>` - ローカルWhisperモデルを設定\n"
+                    "• `/web-settings` - Web設定ページのURLを取得\n\n"
+                    "または直接cookies.txtファイルをアップロードしてください。"
+                )
+                
+        except Exception as e:
+            logger.error(f"Error processing DM command: {e}")
+            self._send_dm_message(channel_id, f"❌ コマンド処理中にエラーが発生しました: {str(e)}")
+    
+    def _handle_help_command(self, channel_id: str) -> None:
+        """Handle /help command."""
+        help_text = """
+🤖 **YouTube2SlackThread Bot ヘルプ**
+
+**設定コマンド:**
+• `/show-settings` - 現在の設定を表示
+• `/set-openai-key <API_KEY>` - OpenAI APIキーを設定
+• `/set-whisper local|openai` - Whisperサービスを選択
+• `/set-model <MODEL>` - ローカルWhisperモデルを設定 (tiny/base/small/medium/large)
+• `/web-settings` - Web設定ページのURLを取得
+
+**ファイルアップロード:**
+• cookies.txtファイルを直接送信してYouTubeCookiesを設定
+
+**YouTube処理:**
+• チャンネルで `/youtube2thread <URL>` を実行
+
+**その他:**
+• `/help` - このヘルプを表示
+
+設定は暗号化されて安全に保存されます。
+        """
+        self._send_dm_message(channel_id, help_text.strip())
+    
+    def _handle_show_settings_command(self, channel_id: str, user_id: str) -> None:
+        """Handle /show-settings command."""
+        try:
+            settings = self.settings_manager.get_settings(user_id)
+            has_cookies = self.settings_manager.has_cookies(user_id)
+            
+            settings_text = f"""
+⚙️ **現在の設定 (User: {user_id})**
+
+**Whisperサービス:** {settings.whisper_service.value}
+**OpenAI APIキー:** {'✅ 設定済み' if settings.openai_api_key else '❌ 未設定'}
+**ローカルWhisperモデル:** {settings.whisper_model}
+**言語設定:** {settings.whisper_language or '自動検出'}
+**タイムスタンプ表示:** {'有効' if settings.include_timestamps else '無効'}
+**YouTubeCookies:** {'✅ 設定済み' if has_cookies else '❌ 未設定'}
+
+設定を変更するには対応するコマンドを使用してください。
+`/help` でコマンド一覧を表示できます。
+            """
+            self._send_dm_message(channel_id, settings_text.strip())
+            
+        except Exception as e:
+            logger.error(f"Error showing settings: {e}")
+            self._send_dm_message(channel_id, f"❌ 設定の取得中にエラーが発生しました: {str(e)}")
+    
+    def _handle_set_openai_key_command(self, channel_id: str, user_id: str, api_key: str) -> None:
+        """Handle /set-openai-key command."""
+        try:
+            if not api_key or not api_key.strip():
+                self._send_dm_message(channel_id, 
+                    "❌ APIキーが指定されていません。\n\n"
+                    "使用方法: `/set-openai-key sk-...`"
+                )
+                return
+            
+            api_key = api_key.strip()
+            
+            # Basic validation
+            if not api_key.startswith('sk-'):
+                self._send_dm_message(channel_id, 
+                    "⚠️ 無効なAPIキー形式です。OpenAI APIキーは 'sk-' で始まります。"
+                )
+                return
+            
+            # Store API key and automatically switch to OpenAI service
+            self.settings_manager.update_openai_api_key(user_id, api_key)
+            
+            self._send_dm_message(channel_id, 
+                "✅ **OpenAI APIキーが設定されました！**\n\n"
+                "Whisperサービスが自動的にOpenAI APIに切り替わりました。\n"
+                "設定確認: `/show-settings`"
+            )
+            
+        except Exception as e:
+            logger.error(f"Error setting OpenAI API key: {e}")
+            self._send_dm_message(channel_id, f"❌ APIキーの設定中にエラーが発生しました: {str(e)}")
+    
+    def _handle_set_whisper_command(self, channel_id: str, user_id: str, service: str) -> None:
+        """Handle /set-whisper command."""
+        try:
+            if not service or service.lower() not in ['local', 'openai']:
+                self._send_dm_message(channel_id, 
+                    "❌ 無効なサービスです。\n\n"
+                    "使用方法: `/set-whisper local` または `/set-whisper openai`"
+                )
+                return
+            
+            service = service.lower()
+            whisper_service = WhisperService.LOCAL if service == 'local' else WhisperService.OPENAI
+            
+            # Check local Whisper permissions when switching to local
+            if whisper_service == WhisperService.LOCAL:
+                # Check if local Whisper is allowed for this user via workflow config
+                # Note: We can't access workflow_config here directly, but we'll check when the transcriber is created
+                # For now, just warn if they're trying to set local without checking permissions
+                pass
+            
+            # Check if OpenAI API key is available when switching to OpenAI
+            if whisper_service == WhisperService.OPENAI:
+                if not self.settings_manager.has_openai_api_key(user_id):
+                    self._send_dm_message(channel_id, 
+                        "⚠️ **OpenAI APIキーが設定されていません**\n\n"
+                        "OpenAI Whisperを使用するには、まずAPIキーを設定してください:\n"
+                        "`/set-openai-key sk-...`"
+                    )
+                    return
+            
+            self.settings_manager.update_whisper_service(user_id, whisper_service)
+            
+            service_name = "ローカルWhisper" if whisper_service == WhisperService.LOCAL else "OpenAI API"
+            self._send_dm_message(channel_id, 
+                f"✅ **Whisperサービスが {service_name} に変更されました！**\n\n"
+                "設定確認: `/show-settings`\n\n"
+                "※ローカルWhisperは管理者によって制限されている場合があります。"
+            )
+            
+        except Exception as e:
+            logger.error(f"Error setting Whisper service: {e}")
+            self._send_dm_message(channel_id, f"❌ Whisperサービスの設定中にエラーが発生しました: {str(e)}")
+    
+    def _handle_set_model_command(self, channel_id: str, user_id: str, model: str) -> None:
+        """Handle /set-model command."""
+        try:
+            if not model:
+                self._send_dm_message(channel_id, 
+                    "❌ モデル名が指定されていません。\n\n"
+                    "使用方法: `/set-model <MODEL>`\n"
+                    "利用可能: tiny, base, small, medium, large"
+                )
+                return
+            
+            model = model.lower().strip()
+            valid_models = ['tiny', 'base', 'small', 'medium', 'large', 'large-v2', 'large-v3']
+            
+            if model not in valid_models:
+                self._send_dm_message(channel_id, 
+                    f"❌ 無効なモデル名: {model}\n\n"
+                    f"利用可能なモデル: {', '.join(valid_models)}"
+                )
+                return
+            
+            self.settings_manager.update_whisper_model(user_id, model)
+            
+            self._send_dm_message(channel_id, 
+                f"✅ **ローカルWhisperモデルが '{model}' に変更されました！**\n\n"
+                "設定確認: `/show-settings`"
+            )
+            
+        except Exception as e:
+            logger.error(f"Error setting Whisper model: {e}")
+            self._send_dm_message(channel_id, f"❌ モデルの設定中にエラーが発生しました: {str(e)}")
+    
+    def _handle_web_settings_command(self, channel_id: str, user_id: str) -> None:
+        """Handle /web-settings command."""
+        try:
+            from .web_token_manager import WebTokenManager
+            
+            # Initialize token manager
+            token_manager = WebTokenManager(
+                db_path='web_tokens.db',
+                token_lifetime_hours=1
+            )
+            
+            # Generate secure access token
+            access_token = token_manager.generate_token(user_id)
+            
+            # Get server configuration
+            server_host = os.environ.get('WEB_UI_HOST', '127.0.0.1')
+            server_port = int(os.environ.get('WEB_UI_PORT', '42390'))
+            base_url = os.environ.get('WEB_UI_BASE_URL', f'http://{server_host}:{server_port}')
+            
+            # Generate secure URL
+            settings_url = f"{base_url}/settings/{access_token.token}"
+            
+            # Format expiration time
+            expires_in = access_token.expires_at.strftime('%Y-%m-%d %H:%M:%S')
+            
+            self._send_dm_message(channel_id, 
+                f"🔒 **セキュア設定ページ**\n\n"
+                f"以下のURLから設定を変更できます：\n"
+                f"🔗 {settings_url}\n\n"
+                f"**重要な注意事項：**\n"
+                f"• 📅 有効期限: {expires_in}\n"
+                f"• 🔒 このURLは一度使用すると無効になります\n"
+                f"• 🚫 他の人と共有しないでください\n"
+                f"• 💻 PCまたはモバイルブラウザでアクセス可能\n\n"
+                f"設定を変更するには、URLをクリックしてブラウザで開いてください。"
+            )
+            
+            logger.info(f"Generated web settings URL for user {user_id}, expires at {expires_in}")
+            
+        except Exception as e:
+            logger.error(f"Error generating web settings URL: {e}")
+            self._send_dm_message(channel_id, 
+                "❌ **Web設定ページエラー**\n\n"
+                "設定ページURLの生成中にエラーが発生しました。\n"
+                "現在はDMコマンドで設定を変更してください。\n\n"
+                "利用可能なコマンド: `/help`"
+            )
+
+    # === Backward Compatibility ===
+    
+    def send_direct_message(self, channel_id: str, message: str) -> bool:
+        """Send direct message (alias for _send_dm_message for compatibility)."""
+        return self._send_dm_message(channel_id, message)

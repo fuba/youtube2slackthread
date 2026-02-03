@@ -3,10 +3,10 @@
 import os
 import logging
 from dataclasses import dataclass
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, List
 import yaml
 
-from .user_cookie_manager import UserCookieManager
+from .user_cookie_manager import UserCookieManager, UserSettingsManager
 
 
 logger = logging.getLogger(__name__)
@@ -28,6 +28,7 @@ class WorkflowConfig:
     whisper_device: Optional[str] = None
     whisper_language: Optional[str] = None
     whisper_download_root: Optional[str] = None
+    allowed_local_users: Optional[List[str]] = None  # Slack User IDs allowed to use local Whisper
     
     # Slack settings
     slack_webhook: Optional[str] = None
@@ -35,8 +36,9 @@ class WorkflowConfig:
     include_timestamps: bool = False
     send_errors_to_slack: bool = False
     
-    # User-specific cookie management
-    cookie_manager: Optional[UserCookieManager] = None
+    # User-specific settings and cookie management
+    settings_manager: Optional[UserSettingsManager] = None
+    cookie_manager: Optional[UserCookieManager] = None  # Backward compatibility
     enable_user_cookies: bool = True
     
     def get_cookies_file_for_user(self, user_id: Optional[str] = None) -> Optional[str]:
@@ -48,11 +50,13 @@ class WorkflowConfig:
         Returns:
             Path to cookies file or None
         """
-        if not user_id or not self.enable_user_cookies or not self.cookie_manager:
+        # Use settings_manager if available, otherwise fall back to cookie_manager
+        manager = self.settings_manager or self.cookie_manager
+        if not user_id or not self.enable_user_cookies or not manager:
             return self.youtube_cookies_file
         
         # Try to get user-specific cookies first
-        user_cookies_path = self.cookie_manager.get_cookies_file_path(user_id)
+        user_cookies_path = manager.get_cookies_file_path(user_id)
         if user_cookies_path:
             logger.info(f"Using user-specific cookies for {user_id}")
             return user_cookies_path
@@ -63,8 +67,25 @@ class WorkflowConfig:
     
     def cleanup_user_temp_files(self, user_id: str) -> None:
         """Clean up temporary files for user."""
-        if self.cookie_manager:
-            self.cookie_manager.cleanup_temp_files(user_id)
+        manager = self.settings_manager or self.cookie_manager
+        if manager:
+            manager.cleanup_temp_files(user_id)
+    
+    def is_local_whisper_allowed(self, user_id: str) -> bool:
+        """Check if user is allowed to use local Whisper.
+        
+        Args:
+            user_id: Slack User ID
+            
+        Returns:
+            True if user is allowed to use local Whisper, False otherwise
+        """
+        # If no restriction list is configured, allow all users
+        if not self.allowed_local_users:
+            return True
+        
+        # If restriction list is configured, only allow listed users
+        return user_id in self.allowed_local_users
     
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any]) -> 'WorkflowConfig':
@@ -80,17 +101,19 @@ class WorkflowConfig:
         whisper_config = config_dict.get('whisper', {})
         slack_config = config_dict.get('slack', {})
         
-        # Initialize cookie manager from environment variable
-        cookie_manager = None
+        # Initialize settings manager (includes cookie management) from environment variable
+        settings_manager = None
+        cookie_manager = None  # Backward compatibility
         encryption_key = os.environ.get('COOKIE_ENCRYPTION_KEY')
         if encryption_key:
             try:
-                cookie_manager = UserCookieManager(
+                settings_manager = UserSettingsManager(
                     db_path='user_cookies.db',
                     encryption_key=encryption_key
                 )
+                cookie_manager = settings_manager  # For backward compatibility
             except Exception as e:
-                logger.warning(f"Failed to initialize cookie manager: {e}")
+                logger.warning(f"Failed to initialize settings manager: {e}")
         
         return cls(
             # YouTube settings
@@ -104,6 +127,7 @@ class WorkflowConfig:
             whisper_device=whisper_config.get('device'),
             whisper_language=whisper_config.get('language'),
             whisper_download_root=whisper_config.get('download_root'),
+            allowed_local_users=whisper_config.get('allowed_local_users'),
             
             # Slack settings
             slack_webhook=slack_config.get('webhook_url'),
@@ -111,7 +135,8 @@ class WorkflowConfig:
             include_timestamps=slack_config.get('include_timestamps', False),
             send_errors_to_slack=slack_config.get('send_errors_to_slack', False),
             
-            # Cookie management settings
+            # User settings and cookie management
+            settings_manager=settings_manager,
             cookie_manager=cookie_manager,
             enable_user_cookies=bool(encryption_key)  # Enable if encryption key is set
         )
