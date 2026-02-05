@@ -6,7 +6,7 @@ from typing import Dict, Any, Optional
 from flask import Flask, render_template_string, request, flash, redirect, url_for
 
 from .web_ui_templates import ERROR_TEMPLATE, SETTINGS_TEMPLATE
-from .user_cookie_manager import WhisperService
+from .user_cookie_manager import WhisperService, CookieFileProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -117,11 +117,19 @@ class SecureWebUI:
                 if settings.whisper_service == WhisperService.OPENAI:
                     settings.whisper_service = WhisperService.LOCAL
                 self.settings_manager.store_settings(access_token.user_id, settings)
-                
+
                 # Generate new token for continued access
                 new_token = self.token_manager.generate_token(access_token.user_id, single_use=False)
                 return redirect(f'/settings/{new_token.token}?success=api_key_deleted')
-            
+
+            # Handle cookies deletion
+            if request.form.get('delete_cookies'):
+                self.settings_manager.delete_cookies(access_token.user_id)
+
+                # Generate new token for continued access
+                new_token = self.token_manager.generate_token(access_token.user_id, single_use=False)
+                return redirect(f'/settings/{new_token.token}?success=cookies_deleted')
+
             # Get current settings
             settings = self.settings_manager.get_settings(access_token.user_id)
             
@@ -160,10 +168,54 @@ class SecureWebUI:
                 if self.workflow_config and hasattr(self.workflow_config, 'is_local_whisper_allowed'):
                     if not self.workflow_config.is_local_whisper_allowed(access_token.user_id):
                         settings.whisper_service = WhisperService.OPENAI
-            
+
+            # Handle cookies file upload
+            cookies_file = request.files.get('cookies_file')
+            if cookies_file and cookies_file.filename:
+                try:
+                    cookies_content = cookies_file.read().decode('utf-8')
+
+                    # Validate cookies format
+                    if not CookieFileProcessor.validate_cookies_file(cookies_content):
+                        has_cookies = self.settings_manager.has_cookies(access_token.user_id)
+                        has_openai_key = self.settings_manager.has_openai_api_key(access_token.user_id)
+                        local_allowed = True
+                        if self.workflow_config and hasattr(self.workflow_config, 'is_local_whisper_allowed'):
+                            local_allowed = self.workflow_config.is_local_whisper_allowed(access_token.user_id)
+
+                        return render_template_string(SETTINGS_TEMPLATE,
+                            title="Personal Settings",
+                            settings=settings,
+                            has_cookies=has_cookies,
+                            has_openai_key=has_openai_key,
+                            local_allowed=local_allowed,
+                            messages=[{'category': 'error', 'message': 'Invalid cookies file format. Please upload a Netscape HTTP Cookie file (cookies.txt).'}]
+                        ), 400
+
+                    # Extract YouTube cookies and store
+                    youtube_cookies = CookieFileProcessor.extract_youtube_cookies(cookies_content)
+                    self.settings_manager.store_cookies(access_token.user_id, youtube_cookies)
+                    logger.info(f"Cookies uploaded via web UI for user {access_token.user_id}")
+
+                except UnicodeDecodeError:
+                    has_cookies = self.settings_manager.has_cookies(access_token.user_id)
+                    has_openai_key = self.settings_manager.has_openai_api_key(access_token.user_id)
+                    local_allowed = True
+                    if self.workflow_config and hasattr(self.workflow_config, 'is_local_whisper_allowed'):
+                        local_allowed = self.workflow_config.is_local_whisper_allowed(access_token.user_id)
+
+                    return render_template_string(SETTINGS_TEMPLATE,
+                        title="Personal Settings",
+                        settings=settings,
+                        has_cookies=has_cookies,
+                        has_openai_key=has_openai_key,
+                        local_allowed=local_allowed,
+                        messages=[{'category': 'error', 'message': 'Invalid file encoding. Please upload a text file.'}]
+                    ), 400
+
             # Store updated settings
             self.settings_manager.store_settings(access_token.user_id, settings)
-            
+
             # Generate new token for continued access
             new_token = self.token_manager.generate_token(access_token.user_id, single_use=False)
             return redirect(f'/settings/{new_token.token}?success=settings_saved')

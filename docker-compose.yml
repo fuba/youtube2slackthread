@@ -13,6 +13,8 @@ services:
       - SLACK_DEFAULT_CHANNEL=${SLACK_DEFAULT_CHANNEL:-}
       - COOKIE_ENCRYPTION_KEY=${COOKIE_ENCRYPTION_KEY}
       - USER_COOKIES_DB_PATH=/app/data/user_cookies.db
+      - WEB_TOKENS_DB_PATH=/app/data/web_tokens.db
+      - WEB_UI_BASE_URL=${WEB_UI_BASE_URL:-http://localhost:42390}
     volumes:
       - ./downloads:/app/downloads
       - ./logs:/app/logs

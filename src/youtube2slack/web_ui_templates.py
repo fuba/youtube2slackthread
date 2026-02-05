@@ -190,7 +190,7 @@ SETTINGS_TEMPLATE = f"""
                 Your API keys are encrypted and stored securely.
             </div>
 
-            <form method="POST">
+            <form method="POST" enctype="multipart/form-data">
                 <div class="settings-grid">
                     <div>
                         <div class="form-group">
@@ -269,16 +269,28 @@ SETTINGS_TEMPLATE = f"""
                                 {{% if has_cookies %}}
                                     ✅ YouTube cookies are configured
                                 {{% else %}}
-                                    ❌ No YouTube cookies (upload via Slack DM)
+                                    ❌ No YouTube cookies configured
                                 {{% endif %}}
+                            </div>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="cookies_file">Upload YouTube Cookies File</label>
+                            <input type="file" id="cookies_file" name="cookies_file" accept=".txt">
+                            <div class="hint">
+                                Upload a Netscape HTTP Cookie file (cookies.txt) from your browser.
+                                Use a browser extension like "Get cookies.txt LOCALLY" to export cookies.
                             </div>
                         </div>
                     </div>
                 </div>
-                
+
                 <div style="margin-top: 30px;">
                     <button type="submit">💾 Save Settings</button>
                     <button type="button" class="btn-danger" onclick="deleteApiKey()">🗑️ Remove API Key</button>
+                    {{% if has_cookies %}}
+                    <button type="button" class="btn-danger" onclick="deleteCookies()">🍪 Remove Cookies</button>
+                    {{% endif %}}
                 </div>
             </form>
             
@@ -297,6 +309,22 @@ SETTINGS_TEMPLATE = f"""
                     'Content-Type': 'application/x-www-form-urlencoded',
                 }},
                 body: 'delete_api_key=1'
+            }}).then(response => {{
+                if (response.ok) {{
+                    window.location.reload();
+                }}
+            }});
+        }}
+    }}
+
+    function deleteCookies() {{
+        if (confirm('Are you sure you want to remove your YouTube cookies?')) {{
+            fetch(window.location.href, {{
+                method: 'POST',
+                headers: {{
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                }},
+                body: 'delete_cookies=1'
             }}).then(response => {{
                 if (response.ok) {{
                     window.location.reload();

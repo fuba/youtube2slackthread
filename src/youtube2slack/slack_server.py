@@ -14,6 +14,7 @@ from slack_sdk.signature import SignatureVerifier
 from .workflow import WorkflowConfig
 from .slack_bot_client import SlackBotClient, ThreadInfo, SlackBotError
 from .whisper_transcriber import WhisperTranscriber, TranscriberFactory
+from .web_token_manager import WebTokenManager
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -57,6 +58,12 @@ class SlackServer:
         
         # Track ongoing processing
         self.active_streams: Dict[str, ActiveStreamInfo] = {}  # key: thread_ts
+
+        # Initialize token manager for web settings
+        self.token_manager = None
+        if self.workflow_config.settings_manager:
+            db_path = os.environ.get('WEB_TOKENS_DB_PATH', 'web_tokens.db')
+            self.token_manager = WebTokenManager(db_path=db_path, token_lifetime_hours=1)
         
     def setup_routes(self):
         """Setup Flask routes."""
@@ -118,6 +125,8 @@ class SlackServer:
                 return self._handle_status_command(channel_id, user_id)
             elif command == '/youtube2thread-stop':
                 return self._handle_stop_command(text, channel_id, user_id)
+            elif command == '/youtube2thread-web-settings':
+                return self._handle_web_settings_command(channel_id, user_id)
             else:
                 return jsonify({
                     'response_type': 'ephemeral',
@@ -327,8 +336,52 @@ class SlackServer:
                 'response_type': 'ephemeral',
                 'text': f'❌ Error stopping streams: {str(e)}'
             })
-    
-    def _handle_youtube_command(self, text: str, channel_id: str, user_id: str, 
+
+    def _handle_web_settings_command(self, channel_id: str, user_id: str) -> Dict[str, Any]:
+        """Handle /youtube2thread-web-settings command.
+
+        Generates a temporary URL for the user to access the web settings page.
+
+        Args:
+            channel_id: Channel ID
+            user_id: User ID
+
+        Returns:
+            JSON response with temporary settings URL
+        """
+        try:
+            if not self.token_manager or not self.workflow_config.settings_manager:
+                return jsonify({
+                    'response_type': 'ephemeral',
+                    'text': '❌ Web settings is not configured. Please ensure COOKIE_ENCRYPTION_KEY is set.'
+                })
+
+            # Generate temporary access token
+            access_token = self.token_manager.generate_token(user_id, single_use=False)
+
+            # Build the settings URL
+            base_url = os.environ.get('WEB_UI_BASE_URL', 'http://localhost:42390')
+            settings_url = f"{base_url}/settings/{access_token.token}"
+
+            return jsonify({
+                'response_type': 'ephemeral',
+                'text': (
+                    f'🔐 *Personal Settings Access*\n\n'
+                    f'Click the link below to access your settings page:\n'
+                    f'{settings_url}\n\n'
+                    f'⏰ This link expires in 1 hour and is for your use only.\n'
+                    f'🔒 You can upload cookies, set OpenAI API key, and configure Whisper settings.'
+                )
+            })
+
+        except Exception as e:
+            logger.error(f"Error generating web settings URL: {e}")
+            return jsonify({
+                'response_type': 'ephemeral',
+                'text': f'❌ Error generating settings URL: {str(e)}'
+            })
+
+    def _handle_youtube_command(self, text: str, channel_id: str, user_id: str,
                                response_url: str) -> Dict[str, Any]:
         """Handle /youtube2thread command.
         
@@ -585,6 +638,14 @@ class SlackServer:
                     else:
                         response_data = response.json
                     return response_data.get('text', 'Stop command processed')
+            elif command == '/youtube2thread-web-settings':
+                with self.app.app_context():
+                    response = self._handle_web_settings_command(channel, user_id)
+                    if isinstance(response, tuple):
+                        response_data = response[0].json
+                    else:
+                        response_data = response.json
+                    return response_data.get('text', 'Web settings command processed')
             else:
                 return f"Unknown command: {command}"
                 
@@ -624,14 +685,22 @@ class SlackServer:
                         logger.error(f"Failed to send ephemeral response: {e}")
                         
             elif req.type == "events_api":
-                # Handle events like messages
+                # Handle events like messages and files
                 event = req.payload.get("event", {})
                 event_type = event.get("type")
                 logger.info(f"Received events_api event: {event_type}")
-                
+
                 if event_type == "message":
                     logger.info(f"Processing message event: {event}")
-                    self._handle_message_event(event)
+                    # Check if message has files (DM cookie upload)
+                    if event.get("files") and event.get("channel", "").startswith("D"):
+                        logger.info(f"DM message with files detected, forwarding to bot client")
+                        self.bot_client._handle_message_with_files(event)
+                    else:
+                        self._handle_message_event(event)
+                elif event_type == "file_shared":
+                    logger.info(f"File shared event detected, forwarding to bot client")
+                    self.bot_client._handle_file_shared_event(event)
             
         except Exception as e:
             logger.error(f"Error in _handle_all_socket_events: {e}")
