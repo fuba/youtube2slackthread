@@ -394,22 +394,35 @@ class SlackBotClient:
                     channel = payload.get('channel_id')
                     user_id = payload.get('user_id')
                     text = payload.get('text', '')
-                    
+                    response_url = payload.get('response_url')
+
                     # Call the handler
                     response_text = command_handler(command, channel, user_id, text)
-                    
+
                     # Acknowledge the command
                     response = SocketModeResponse(envelope_id=req.envelope_id)
                     client.send_socket_mode_response(response)
-                    
-                    # Send response if provided
-                    if response_text:
-                        self.web_client.chat_postEphemeral(
-                            channel=channel,
-                            user=user_id,
-                            text=response_text
-                        )
-                        
+
+                    # Send response if provided using response_url (works without channel membership)
+                    if response_text and response_url:
+                        import requests
+                        try:
+                            requests.post(response_url, json={
+                                'response_type': 'ephemeral',
+                                'text': response_text
+                            }, timeout=10)
+                        except Exception as e:
+                            logger.error(f"Failed to send response via response_url: {e}")
+                            # Fallback to chat_postEphemeral
+                            try:
+                                self.web_client.chat_postEphemeral(
+                                    channel=channel,
+                                    user=user_id,
+                                    text=response_text
+                                )
+                            except Exception as e2:
+                                logger.error(f"Fallback chat_postEphemeral also failed: {e2}")
+
                 except Exception as e:
                     logger.error(f"Error handling slash command: {e}")
                     response = SocketModeResponse(envelope_id=req.envelope_id)

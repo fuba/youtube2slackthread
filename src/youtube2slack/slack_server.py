@@ -556,31 +556,25 @@ class SlackServer:
                 return f'🚀 Starting VAD stream processing: {text}\nI\'ll create a thread when ready!'
                 
             elif command == '/youtube2thread-status':
-                # Handle status command with app context - send blocks directly
+                # Handle status command - return text for response_url
                 with self.app.app_context():
-                    response = self._handle_status_command(channel, user_id)
-                    # Extract response data
-                    if isinstance(response, tuple):
-                        response_data = response[0].json
-                    else:
-                        response_data = response.json
-                    
-                    # Send blocks directly via web client for full status display
-                    try:
-                        blocks = response_data.get('blocks', [])
-                        if blocks:
-                            self.bot_client.web_client.chat_postEphemeral(
-                                channel=channel,
-                                user=user_id,
-                                text="🔧 YouTube2SlackThread Status",
-                                blocks=blocks
-                            )
-                            return None  # Don't return text since we already posted
-                        else:
-                            return response_data.get('text', '✅ Status retrieved')
-                    except Exception as e:
-                        logger.error(f"Failed to send status blocks: {e}")
-                        return response_data.get('text', 'Status retrieved')
+                    # Build status text directly
+                    status_lines = ["🔧 **YouTube2SlackThread Status**\n"]
+
+                    # Active streams
+                    active_count = len(self.active_streams)
+                    status_lines.append(f"📊 Active Streams: {active_count}")
+
+                    if active_count > 0:
+                        for key, info in list(self.active_streams.items())[:5]:
+                            elapsed = (datetime.now() - info.started_at).total_seconds() / 60
+                            status_lines.append(f"  • {info.video_url[:50]}... ({elapsed:.1f}min)")
+
+                    # System info
+                    status_lines.append(f"\n✅ Server: Running")
+                    status_lines.append(f"✅ Socket Mode: Connected")
+
+                    return "\n".join(status_lines)
                     
             elif command == '/youtube2thread-stop':
                 with self.app.app_context():
