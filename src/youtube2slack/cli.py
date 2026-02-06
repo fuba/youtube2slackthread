@@ -1,4 +1,4 @@
-"""Simplified command-line interface for YouTube2SlackThread - Slash commands only."""
+"""Command-line interface for YouTube2SlackThread with multi-workspace support."""
 
 import os
 import sys
@@ -10,6 +10,9 @@ import click
 from .workflow import WorkflowConfig
 from .slack_server import SlackServer
 from .slack_bot_client import SlackBotClient
+
+# Logger for CLI
+logger = logging.getLogger(__name__)
 
 
 def setup_logging(verbose: bool = False, log_file: Optional[str] = None) -> None:
@@ -220,7 +223,7 @@ def web(ctx, host: str, port: int, debug: bool):
 @cli.command()
 def create_config():
     """Create a sample configuration file."""
-    
+
     config_content = '''# YouTube2SlackThread Configuration File
 
 youtube:
@@ -239,17 +242,17 @@ slack:
   include_timestamps: false          # Include timestamps in transcription
   send_errors_to_slack: true         # Send error notifications to Slack
 '''
-    
+
     config_path = 'config.yaml'
     if Path(config_path).exists():
         if not click.confirm(f'{config_path} already exists. Overwrite?'):
             click.echo("Config creation cancelled.")
             return
-    
+
     try:
         with open(config_path, 'w') as f:
             f.write(config_content)
-        click.echo(f"✓ Created config file: {config_path}")
+        click.echo(f"Created config file: {config_path}")
         click.echo("\nNext steps:")
         click.echo("1. Edit config.yaml to set your preferences")
         click.echo("2. Set the following environment variables:")
@@ -260,9 +263,269 @@ slack:
         click.echo("   - COOKIE_ENCRYPTION_KEY (for user cookie management)")
         click.echo("\n3. Generate encryption key:")
         click.echo("   python -c \"import secrets; print(secrets.token_urlsafe(32))\"")
-        
+
     except Exception as e:
-        click.echo(f"✗ Failed to create config: {e}", err=True)
+        click.echo(f"Failed to create config: {e}", err=True)
+        sys.exit(1)
+
+
+# ============================================================================
+# Workspace Management Commands
+# ============================================================================
+
+@cli.group()
+def workspace():
+    """Manage Slack workspaces for multi-workspace deployment."""
+    pass
+
+
+@workspace.command('add')
+@click.option('--team-id', required=True, help='Slack team ID (e.g., T0123456789)')
+@click.option('--team-name', required=True, help='Human-readable team name')
+@click.option('--bot-token', required=True, help='Slack Bot User OAuth Token (xoxb-...)')
+@click.option('--signing-secret', required=True, help='Slack app signing secret')
+@click.option('--app-token', default=None, help='Slack App-Level Token for Socket Mode (xapp-...)')
+@click.pass_context
+def workspace_add(ctx, team_id: str, team_name: str, bot_token: str,
+                  signing_secret: str, app_token: Optional[str]):
+    """Add a new Slack workspace."""
+    try:
+        from .workspace_manager import WorkspaceManager
+
+        encryption_key = os.environ.get('COOKIE_ENCRYPTION_KEY')
+        if not encryption_key:
+            click.echo("Error: COOKIE_ENCRYPTION_KEY environment variable is required.", err=True)
+            sys.exit(1)
+
+        db_path = os.environ.get('USER_COOKIES_DB_PATH', 'user_cookies.db')
+        manager = WorkspaceManager(db_path=db_path, encryption_key=encryption_key)
+
+        workspace = manager.add_workspace(
+            team_id=team_id,
+            team_name=team_name,
+            bot_token=bot_token,
+            signing_secret=signing_secret,
+            app_token=app_token
+        )
+
+        click.echo(f"Added workspace: {workspace.team_id} ({workspace.team_name})")
+        if app_token:
+            click.echo("  Socket Mode: enabled")
+        else:
+            click.echo("  Socket Mode: disabled (no app_token)")
+
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"Failed to add workspace: {e}", err=True)
+        sys.exit(1)
+
+
+@workspace.command('list')
+@click.option('--all', 'show_all', is_flag=True, help='Show inactive workspaces too')
+@click.pass_context
+def workspace_list(ctx, show_all: bool):
+    """List all registered workspaces."""
+    try:
+        from .workspace_manager import WorkspaceManager
+
+        encryption_key = os.environ.get('COOKIE_ENCRYPTION_KEY')
+        if not encryption_key:
+            click.echo("Error: COOKIE_ENCRYPTION_KEY environment variable is required.", err=True)
+            sys.exit(1)
+
+        db_path = os.environ.get('USER_COOKIES_DB_PATH', 'user_cookies.db')
+        manager = WorkspaceManager(db_path=db_path, encryption_key=encryption_key)
+
+        workspaces = manager.list_workspaces(active_only=not show_all)
+
+        if not workspaces:
+            click.echo("No workspaces registered.")
+            click.echo("\nTo add a workspace:")
+            click.echo("  youtube2slack workspace add --team-id T... --team-name \"Name\" --bot-token xoxb-... --signing-secret ...")
+            return
+
+        click.echo(f"Registered workspaces ({len(workspaces)}):\n")
+        for ws in workspaces:
+            status = "active" if ws.is_active else "inactive"
+            socket_mode = "enabled" if ws.app_token else "disabled"
+            click.echo(f"  {ws.team_id} - {ws.team_name}")
+            click.echo(f"    Status: {status}")
+            click.echo(f"    Socket Mode: {socket_mode}")
+            if ws.created_at:
+                click.echo(f"    Created: {ws.created_at.strftime('%Y-%m-%d %H:%M:%S')}")
+            click.echo()
+
+    except Exception as e:
+        click.echo(f"Failed to list workspaces: {e}", err=True)
+        sys.exit(1)
+
+
+@workspace.command('remove')
+@click.option('--team-id', required=True, help='Slack team ID to remove')
+@click.option('--force', is_flag=True, help='Skip confirmation')
+@click.pass_context
+def workspace_remove(ctx, team_id: str, force: bool):
+    """Remove a Slack workspace."""
+    try:
+        from .workspace_manager import WorkspaceManager
+
+        encryption_key = os.environ.get('COOKIE_ENCRYPTION_KEY')
+        if not encryption_key:
+            click.echo("Error: COOKIE_ENCRYPTION_KEY environment variable is required.", err=True)
+            sys.exit(1)
+
+        db_path = os.environ.get('USER_COOKIES_DB_PATH', 'user_cookies.db')
+        manager = WorkspaceManager(db_path=db_path, encryption_key=encryption_key)
+
+        # Check if workspace exists
+        workspace = manager.get_workspace(team_id)
+        if not workspace:
+            click.echo(f"Workspace not found: {team_id}", err=True)
+            sys.exit(1)
+
+        if not force:
+            if not click.confirm(f"Remove workspace {team_id} ({workspace.team_name})?"):
+                click.echo("Cancelled.")
+                return
+
+        if manager.remove_workspace(team_id):
+            click.echo(f"Removed workspace: {team_id}")
+        else:
+            click.echo(f"Failed to remove workspace: {team_id}", err=True)
+            sys.exit(1)
+
+    except Exception as e:
+        click.echo(f"Failed to remove workspace: {e}", err=True)
+        sys.exit(1)
+
+
+@workspace.command('migrate')
+@click.option('--team-id', required=True, help='Target Slack team ID for migration')
+@click.option('--from-team-id', default=None, help='Source team ID (default: _default_)')
+@click.pass_context
+def workspace_migrate(ctx, team_id: str, from_team_id: Optional[str]):
+    """Migrate existing user data to a specific workspace.
+
+    This command migrates user cookies and settings from the default team
+    (or another specified team) to the target workspace.
+    """
+    try:
+        from .user_cookie_manager import UserSettingsManager, DEFAULT_TEAM_ID
+
+        encryption_key = os.environ.get('COOKIE_ENCRYPTION_KEY')
+        if not encryption_key:
+            click.echo("Error: COOKIE_ENCRYPTION_KEY environment variable is required.", err=True)
+            sys.exit(1)
+
+        db_path = os.environ.get('USER_COOKIES_DB_PATH', 'user_cookies.db')
+        settings_manager = UserSettingsManager(db_path=db_path, encryption_key=encryption_key)
+
+        source_team = from_team_id or DEFAULT_TEAM_ID
+        click.echo(f"Migrating user data from '{source_team}' to '{team_id}'...")
+
+        migrated = settings_manager.migrate_user_data_to_team(team_id, from_team_id)
+
+        click.echo(f"Migration complete. {migrated} records migrated.")
+
+    except Exception as e:
+        click.echo(f"Migration failed: {e}", err=True)
+        sys.exit(1)
+
+
+@workspace.command('discover')
+@click.pass_context
+def workspace_discover(ctx):
+    """Discover team_id from current SLACK_BOT_TOKEN.
+
+    Uses the Slack API to get the team_id for the currently configured bot token.
+    Useful for finding the correct team_id when setting up a workspace.
+    """
+    try:
+        from slack_sdk import WebClient
+
+        bot_token = os.environ.get('SLACK_BOT_TOKEN')
+        if not bot_token:
+            click.echo("Error: SLACK_BOT_TOKEN environment variable is required.", err=True)
+            sys.exit(1)
+
+        client = WebClient(token=bot_token)
+        auth_result = client.auth_test()
+
+        team_id = auth_result.get('team_id')
+        team_name = auth_result.get('team')
+        bot_user = auth_result.get('user')
+        bot_user_id = auth_result.get('user_id')
+
+        click.echo("Workspace discovered:\n")
+        click.echo(f"  Team ID: {team_id}")
+        click.echo(f"  Team Name: {team_name}")
+        click.echo(f"  Bot User: {bot_user} ({bot_user_id})")
+        click.echo("\nTo add this workspace:")
+        click.echo(f"  youtube2slack workspace add \\")
+        click.echo(f"    --team-id {team_id} \\")
+        click.echo(f"    --team-name \"{team_name}\" \\")
+        click.echo(f"    --bot-token $SLACK_BOT_TOKEN \\")
+        click.echo(f"    --signing-secret $SLACK_SIGNING_SECRET \\")
+        click.echo(f"    --app-token $SLACK_APP_TOKEN  # Optional, for Socket Mode")
+
+    except Exception as e:
+        click.echo(f"Failed to discover workspace: {e}", err=True)
+        sys.exit(1)
+
+
+@workspace.command('activate')
+@click.option('--team-id', required=True, help='Slack team ID to activate')
+@click.pass_context
+def workspace_activate(ctx, team_id: str):
+    """Activate a workspace."""
+    try:
+        from .workspace_manager import WorkspaceManager
+
+        encryption_key = os.environ.get('COOKIE_ENCRYPTION_KEY')
+        if not encryption_key:
+            click.echo("Error: COOKIE_ENCRYPTION_KEY environment variable is required.", err=True)
+            sys.exit(1)
+
+        db_path = os.environ.get('USER_COOKIES_DB_PATH', 'user_cookies.db')
+        manager = WorkspaceManager(db_path=db_path, encryption_key=encryption_key)
+
+        if manager.set_workspace_active(team_id, True):
+            click.echo(f"Activated workspace: {team_id}")
+        else:
+            click.echo(f"Workspace not found: {team_id}", err=True)
+            sys.exit(1)
+
+    except Exception as e:
+        click.echo(f"Failed to activate workspace: {e}", err=True)
+        sys.exit(1)
+
+
+@workspace.command('deactivate')
+@click.option('--team-id', required=True, help='Slack team ID to deactivate')
+@click.pass_context
+def workspace_deactivate(ctx, team_id: str):
+    """Deactivate a workspace (keep data but stop processing)."""
+    try:
+        from .workspace_manager import WorkspaceManager
+
+        encryption_key = os.environ.get('COOKIE_ENCRYPTION_KEY')
+        if not encryption_key:
+            click.echo("Error: COOKIE_ENCRYPTION_KEY environment variable is required.", err=True)
+            sys.exit(1)
+
+        db_path = os.environ.get('USER_COOKIES_DB_PATH', 'user_cookies.db')
+        manager = WorkspaceManager(db_path=db_path, encryption_key=encryption_key)
+
+        if manager.set_workspace_active(team_id, False):
+            click.echo(f"Deactivated workspace: {team_id}")
+        else:
+            click.echo(f"Workspace not found: {team_id}", err=True)
+            sys.exit(1)
+
+    except Exception as e:
+        click.echo(f"Failed to deactivate workspace: {e}", err=True)
         sys.exit(1)
 
 

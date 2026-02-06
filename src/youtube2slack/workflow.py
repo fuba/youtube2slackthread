@@ -41,35 +41,42 @@ class WorkflowConfig:
     cookie_manager: Optional[UserCookieManager] = None  # Backward compatibility
     enable_user_cookies: bool = True
     
-    def get_cookies_file_for_user(self, user_id: Optional[str] = None) -> Optional[str]:
+    def get_cookies_file_for_user(self, user_id: Optional[str] = None,
+                                   team_id: Optional[str] = None) -> Optional[str]:
         """Get cookies file path for specific user.
-        
+
         Args:
-            user_id: Slack user ID, if None uses default cookies
-            
+            user_id: Slack user ID, if None uses default cookies.
+            team_id: Slack team ID for multi-workspace support.
+
         Returns:
-            Path to cookies file or None
+            Path to cookies file or None.
         """
         # Use settings_manager if available, otherwise fall back to cookie_manager
         manager = self.settings_manager or self.cookie_manager
         if not user_id or not self.enable_user_cookies or not manager:
             return self.youtube_cookies_file
-        
-        # Try to get user-specific cookies first
-        user_cookies_path = manager.get_cookies_file_path(user_id)
+
+        # Try to get user-specific cookies first (with team_id)
+        user_cookies_path = manager.get_cookies_file_path(user_id, team_id=team_id)
         if user_cookies_path:
-            logger.info(f"Using user-specific cookies for {user_id}")
+            logger.info(f"Using user-specific cookies for {user_id} in team {team_id}")
             return user_cookies_path
-        
+
         # Fall back to default cookies if no user-specific cookies
-        logger.info(f"No user-specific cookies for {user_id}, using default cookies")
+        logger.info(f"No user-specific cookies for {user_id} in team {team_id}, using default cookies")
         return self.youtube_cookies_file
     
-    def cleanup_user_temp_files(self, user_id: str) -> None:
-        """Clean up temporary files for user."""
+    def cleanup_user_temp_files(self, user_id: str, team_id: Optional[str] = None) -> None:
+        """Clean up temporary files for user.
+
+        Args:
+            user_id: Slack user ID.
+            team_id: Slack team ID for multi-workspace support.
+        """
         manager = self.settings_manager or self.cookie_manager
         if manager:
-            manager.cleanup_temp_files(user_id)
+            manager.cleanup_temp_files(user_id, team_id=team_id)
     
     def is_local_whisper_allowed(self, user_id: str) -> bool:
         """Check if user is allowed to use local Whisper.

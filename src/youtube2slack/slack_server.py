@@ -98,7 +98,7 @@ class SlackServer:
     
     def _handle_slash_command(self) -> Dict[str, Any]:
         """Handle incoming slash command.
-        
+
         Returns:
             JSON response for Slack
         """
@@ -106,7 +106,7 @@ class SlackServer:
         if not self._verify_request():
             logger.warning("Invalid request signature")
             return jsonify({'text': 'Invalid request signature'}), 401
-        
+
         try:
             # Parse form data
             form_data = request.form
@@ -114,25 +114,26 @@ class SlackServer:
             text = form_data.get('text', '').strip()
             channel_id = form_data.get('channel_id')
             user_id = form_data.get('user_id')
+            team_id = form_data.get('team_id')  # Extract team_id for multi-workspace
             response_url = form_data.get('response_url')
-            
-            logger.info(f"Received command: {command} from user {user_id} in channel {channel_id}")
-            
+
+            logger.info(f"Received command: {command} from user {user_id} in team {team_id}, channel {channel_id}")
+
             # Handle different commands
             if command == '/youtube2thread':
-                return self._handle_youtube_command(text, channel_id, user_id, response_url)
+                return self._handle_youtube_command(text, channel_id, user_id, response_url, team_id)
             elif command == '/youtube2thread-status':
-                return self._handle_status_command(channel_id, user_id)
+                return self._handle_status_command(channel_id, user_id, team_id)
             elif command == '/youtube2thread-stop':
                 return self._handle_stop_command(text, channel_id, user_id)
             elif command == '/youtube2thread-web-settings':
-                return self._handle_web_settings_command(channel_id, user_id)
+                return self._handle_web_settings_command(channel_id, user_id, team_id)
             else:
                 return jsonify({
                     'response_type': 'ephemeral',
                     'text': f'Unknown command: {command}'
                 })
-                
+
         except Exception as e:
             logger.error(f"Error handling slash command: {e}")
             return jsonify({
@@ -140,13 +141,15 @@ class SlackServer:
                 'text': f'Error processing command: {e}'
             }), 500
     
-    def _handle_status_command(self, channel_id: str, user_id: str) -> Dict[str, Any]:
+    def _handle_status_command(self, channel_id: str, user_id: str,
+                               team_id: Optional[str] = None) -> Dict[str, Any]:
         """Handle /youtube2thread-status command for system diagnostics.
-        
+
         Args:
             channel_id: Channel ID
             user_id: User ID
-            
+            team_id: Slack team ID (for multi-workspace support)
+
         Returns:
             JSON response with status information
         """
@@ -314,30 +317,120 @@ class SlackServer:
     
     def _handle_stop_command(self, text: str, channel_id: str, user_id: str) -> Dict[str, Any]:
         """Handle /youtube2thread-stop command.
-        
+
         Args:
-            text: Command text (optional stream ID)
+            text: Command text (optional thread_ts to stop specific stream)
             channel_id: Channel ID
             user_id: User ID
-            
+
         Returns:
             JSON response
         """
         try:
-            # Note: Stream stopping not implemented in VADStreamProcessor
-            return jsonify({
-                'response_type': 'ephemeral',
-                'text': '⚠️ Stream stopping not yet implemented for this processor.'
-            })
-                    
+            # Find active streams for this user
+            user_streams = [
+                (thread_ts, stream_info)
+                for thread_ts, stream_info in self.active_streams.items()
+                if stream_info.user_id == user_id and stream_info.is_running
+            ]
+
+            if not user_streams:
+                return jsonify({
+                    'response_type': 'ephemeral',
+                    'text': 'No active streams to stop.'
+                })
+
+            # If specific thread_ts provided, stop only that stream
+            if text.strip():
+                target_ts = text.strip()
+                if target_ts in self.active_streams:
+                    stream_info = self.active_streams[target_ts]
+                    if stream_info.user_id != user_id:
+                        return jsonify({
+                            'response_type': 'ephemeral',
+                            'text': 'You can only stop your own streams.'
+                        })
+                    stopped = self._stop_stream(target_ts, stream_info)
+                    if stopped:
+                        return jsonify({
+                            'response_type': 'ephemeral',
+                            'text': f'Stopped stream: {stream_info.video_url}'
+                        })
+                    else:
+                        return jsonify({
+                            'response_type': 'ephemeral',
+                            'text': 'Failed to stop stream.'
+                        })
+                else:
+                    return jsonify({
+                        'response_type': 'ephemeral',
+                        'text': f'Stream not found: {target_ts}'
+                    })
+
+            # Stop all active streams for this user
+            stopped_count = 0
+            stopped_urls = []
+            for thread_ts, stream_info in user_streams:
+                if self._stop_stream(thread_ts, stream_info):
+                    stopped_count += 1
+                    stopped_urls.append(stream_info.video_url)
+
+            if stopped_count > 0:
+                urls_text = '\n'.join(f'- {url}' for url in stopped_urls)
+                return jsonify({
+                    'response_type': 'ephemeral',
+                    'text': f'Stopped {stopped_count} stream(s):\n{urls_text}'
+                })
+            else:
+                return jsonify({
+                    'response_type': 'ephemeral',
+                    'text': 'No streams were stopped.'
+                })
+
         except Exception as e:
             logger.error(f"Error stopping streams: {e}")
             return jsonify({
                 'response_type': 'ephemeral',
-                'text': f'❌ Error stopping streams: {str(e)}'
+                'text': f'Error stopping streams: {str(e)}'
             })
 
-    def _handle_web_settings_command(self, channel_id: str, user_id: str) -> Dict[str, Any]:
+    def _stop_stream(self, thread_ts: str, stream_info: ActiveStreamInfo) -> bool:
+        """Stop a single stream.
+
+        Args:
+            thread_ts: Thread timestamp identifying the stream.
+            stream_info: ActiveStreamInfo for the stream.
+
+        Returns:
+            True if stopped successfully.
+        """
+        try:
+            # Stop the processor if it has a stop method
+            if stream_info.processor and hasattr(stream_info.processor, 'stop_processing'):
+                stream_info.processor.stop_processing()
+                logger.info(f"Called stop_processing on stream {thread_ts}")
+
+            # Mark as not running
+            stream_info.is_running = False
+
+            # Post a message to the thread
+            try:
+                self.bot_client.post_to_thread(
+                    stream_info.thread_info,
+                    "Stream stopped by user request."
+                )
+            except Exception as e:
+                logger.warning(f"Failed to post stop message to thread: {e}")
+
+            logger.info(f"Stopped stream {thread_ts}: {stream_info.video_url}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to stop stream {thread_ts}: {e}")
+            return False
+
+    def _handle_web_settings_command(self, channel_id: str, user_id: str,
+                                      team_id: Optional[str] = None) -> Dict[str, Any]:
         """Handle /youtube2thread-web-settings command.
 
         Generates a temporary URL for the user to access the web settings page.
@@ -345,6 +438,7 @@ class SlackServer:
         Args:
             channel_id: Channel ID
             user_id: User ID
+            team_id: Slack team ID (for multi-workspace support)
 
         Returns:
             JSON response with temporary settings URL
@@ -353,11 +447,11 @@ class SlackServer:
             if not self.token_manager or not self.workflow_config.settings_manager:
                 return jsonify({
                     'response_type': 'ephemeral',
-                    'text': '❌ Web settings is not configured. Please ensure COOKIE_ENCRYPTION_KEY is set.'
+                    'text': 'Web settings is not configured. Please ensure COOKIE_ENCRYPTION_KEY is set.'
                 })
 
-            # Generate temporary access token
-            access_token = self.token_manager.generate_token(user_id, single_use=False)
+            # Generate temporary access token (with team_id)
+            access_token = self.token_manager.generate_token(user_id, single_use=False, team_id=team_id)
 
             # Build the settings URL
             base_url = os.environ.get('WEB_UI_BASE_URL', 'http://localhost:42390')
@@ -366,11 +460,11 @@ class SlackServer:
             return jsonify({
                 'response_type': 'ephemeral',
                 'text': (
-                    f'🔐 *Personal Settings Access*\n\n'
+                    f'*Personal Settings Access*\n\n'
                     f'Click the link below to access your settings page:\n'
                     f'{settings_url}\n\n'
-                    f'⏰ This link expires in 1 hour and is for your use only.\n'
-                    f'🔒 You can upload cookies, set OpenAI API key, and configure Whisper settings.'
+                    f'This link expires in 1 hour and is for your use only.\n'
+                    f'You can upload cookies, set OpenAI API key, and configure Whisper settings.'
                 )
             })
 
@@ -378,19 +472,21 @@ class SlackServer:
             logger.error(f"Error generating web settings URL: {e}")
             return jsonify({
                 'response_type': 'ephemeral',
-                'text': f'❌ Error generating settings URL: {str(e)}'
+                'text': f'Error generating settings URL: {str(e)}'
             })
 
     def _handle_youtube_command(self, text: str, channel_id: str, user_id: str,
-                               response_url: str) -> Dict[str, Any]:
+                               response_url: str,
+                               team_id: Optional[str] = None) -> Dict[str, Any]:
         """Handle /youtube2thread command.
-        
+
         Args:
             text: Command text (YouTube URL)
             channel_id: Channel ID
             user_id: User ID
             response_url: Response URL for delayed responses
-            
+            team_id: Slack team ID (for multi-workspace support)
+
         Returns:
             JSON response
         """
@@ -399,7 +495,7 @@ class SlackServer:
                 'response_type': 'ephemeral',
                 'text': 'Please provide a YouTube URL. Usage: `/youtube2thread https://youtube.com/watch?v=...`'
             })
-        
+
         # Validate YouTube URL
         import re
         youtube_pattern = r'(youtube\.com|youtu\.be)'
@@ -408,48 +504,50 @@ class SlackServer:
                 'response_type': 'ephemeral',
                 'text': 'Please provide a valid YouTube URL.'
             })
-        
-        # Check if user has uploaded cookies
-        if not self.workflow_config.cookie_manager.has_cookies(user_id):
+
+        # Check if user has uploaded cookies (with team_id)
+        if not self.workflow_config.cookie_manager.has_cookies(user_id, team_id=team_id):
             return jsonify({
                 'response_type': 'ephemeral',
-                'text': '🔒 You need to upload your YouTube cookies first!\n\n'
+                'text': 'You need to upload your YouTube cookies first!\n\n'
                        'Please DM me a cookies.txt file to use this feature.\n'
                        'Export your cookies from your browser using a browser extension.'
             })
-        
+
         # Start VAD stream processing
         thread = threading.Thread(
             target=self._process_simple_vad_in_background,
-            args=(text, channel_id, user_id, response_url)
+            args=(text, channel_id, user_id, response_url, team_id)
         )
         thread.daemon = True
         thread.start()
-        
+
         return jsonify({
             'response_type': 'ephemeral',
-            'text': f'🚀 Starting VAD stream processing: {text}\nI\'ll create a thread when ready!'
+            'text': f'Starting VAD stream processing: {text}\nI\'ll create a thread when ready!'
         })
     
-    def _process_simple_vad_in_background(self, video_url: str, channel_id: str, 
-                                        user_id: str, response_url: str) -> None:
+    def _process_simple_vad_in_background(self, video_url: str, channel_id: str,
+                                        user_id: str, response_url: str,
+                                        team_id: Optional[str] = None) -> None:
         """VAD processing using VADStreamProcessor.
-        
+
         Args:
             video_url: YouTube video/stream URL
             channel_id: Slack channel ID
             user_id: User ID who initiated the command
             response_url: Response URL for updates
+            team_id: Slack team ID (for multi-workspace support)
         """
         try:
             from .vad_stream_processor import VADStreamProcessor
-            
-            # Create transcriber based on user settings
-            user_settings = self.workflow_config.settings_manager.get_settings(user_id)
+
+            # Create transcriber based on user settings (with team_id)
+            user_settings = self.workflow_config.settings_manager.get_settings(user_id, team_id=team_id)
             transcriber = TranscriberFactory.create_transcriber(user_settings, self.workflow_config, user_id)
-            
-            # Get user-specific cookies if available
-            user_cookies_file = self.workflow_config.get_cookies_file_for_user(user_id)
+
+            # Get user-specific cookies if available (with team_id)
+            user_cookies_file = self.workflow_config.get_cookies_file_for_user(user_id, team_id=team_id)
             
             # Create VAD processor with user-specific cookies
             vad_processor = VADStreamProcessor(

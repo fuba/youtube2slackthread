@@ -69,18 +69,19 @@ class SecureWebUI:
                 error_title="Invalid or Expired Token",
                 error_message="This settings page URL is invalid or has expired. Please request a new one via Slack DM."
             ), 403
-        
+
         try:
-            # Get user settings
-            settings = self.settings_manager.get_settings(access_token.user_id)
-            has_cookies = self.settings_manager.has_cookies(access_token.user_id)
-            has_openai_key = self.settings_manager.has_openai_api_key(access_token.user_id)
-            
+            # Get user settings (with team_id from token)
+            team_id = access_token.team_id
+            settings = self.settings_manager.get_settings(access_token.user_id, team_id=team_id)
+            has_cookies = self.settings_manager.has_cookies(access_token.user_id, team_id=team_id)
+            has_openai_key = self.settings_manager.has_openai_api_key(access_token.user_id, team_id=team_id)
+
             # Check if local Whisper is allowed for this user
             local_allowed = True
             if self.workflow_config and hasattr(self.workflow_config, 'is_local_whisper_allowed'):
                 local_allowed = self.workflow_config.is_local_whisper_allowed(access_token.user_id)
-            
+
             return render_template_string(SETTINGS_TEMPLATE,
                 title="Personal Settings",
                 settings=settings,
@@ -89,7 +90,7 @@ class SecureWebUI:
                 local_allowed=local_allowed,
                 messages=[]
             )
-            
+
         except Exception as e:
             logger.error(f"Error loading settings page: {e}")
             return render_template_string(ERROR_TEMPLATE,
@@ -108,50 +109,53 @@ class SecureWebUI:
                 error_title="Invalid or Expired Token",
                 error_message="This settings page URL is invalid or has expired. Please request a new one via Slack DM."
             ), 403
-        
+
+        # Get team_id from token for multi-workspace support
+        team_id = access_token.team_id
+
         try:
             # Handle API key deletion
             if request.form.get('delete_api_key'):
-                settings = self.settings_manager.get_settings(access_token.user_id)
+                settings = self.settings_manager.get_settings(access_token.user_id, team_id=team_id)
                 settings.openai_api_key = None
                 if settings.whisper_service == WhisperService.OPENAI:
                     settings.whisper_service = WhisperService.LOCAL
-                self.settings_manager.store_settings(access_token.user_id, settings)
+                self.settings_manager.store_settings(access_token.user_id, settings, team_id=team_id)
 
                 # Generate new token for continued access
-                new_token = self.token_manager.generate_token(access_token.user_id, single_use=False)
+                new_token = self.token_manager.generate_token(access_token.user_id, single_use=False, team_id=team_id)
                 return redirect(f'/settings/{new_token.token}?success=api_key_deleted')
 
             # Handle cookies deletion
             if request.form.get('delete_cookies'):
-                self.settings_manager.delete_cookies(access_token.user_id)
+                self.settings_manager.delete_cookies(access_token.user_id, team_id=team_id)
 
                 # Generate new token for continued access
-                new_token = self.token_manager.generate_token(access_token.user_id, single_use=False)
+                new_token = self.token_manager.generate_token(access_token.user_id, single_use=False, team_id=team_id)
                 return redirect(f'/settings/{new_token.token}?success=cookies_deleted')
 
             # Get current settings
-            settings = self.settings_manager.get_settings(access_token.user_id)
-            
+            settings = self.settings_manager.get_settings(access_token.user_id, team_id=team_id)
+
             # Update settings from form
             whisper_service = request.form.get('whisper_service', 'local')
             settings.whisper_service = WhisperService(whisper_service)
-            
+
             settings.whisper_model = request.form.get('whisper_model', 'base')
             settings.whisper_language = request.form.get('whisper_language') or None
             settings.include_timestamps = bool(request.form.get('include_timestamps'))
-            
+
             # Update OpenAI API key if provided
             openai_key = request.form.get('openai_api_key', '').strip()
             if openai_key:
                 if not openai_key.startswith('sk-'):
                     # Return error for invalid API key format
-                    has_cookies = self.settings_manager.has_cookies(access_token.user_id)
-                    has_openai_key = self.settings_manager.has_openai_api_key(access_token.user_id)
+                    has_cookies = self.settings_manager.has_cookies(access_token.user_id, team_id=team_id)
+                    has_openai_key = self.settings_manager.has_openai_api_key(access_token.user_id, team_id=team_id)
                     local_allowed = True
                     if self.workflow_config and hasattr(self.workflow_config, 'is_local_whisper_allowed'):
                         local_allowed = self.workflow_config.is_local_whisper_allowed(access_token.user_id)
-                    
+
                     return render_template_string(SETTINGS_TEMPLATE,
                         title="Personal Settings",
                         settings=settings,
@@ -160,9 +164,9 @@ class SecureWebUI:
                         local_allowed=local_allowed,
                         messages=[{'category': 'error', 'message': 'Invalid API key format. OpenAI API keys start with "sk-".'}]
                     ), 400
-                
+
                 settings.openai_api_key = openai_key
-            
+
             # Validate local Whisper access
             if settings.whisper_service == WhisperService.LOCAL:
                 if self.workflow_config and hasattr(self.workflow_config, 'is_local_whisper_allowed'):
@@ -177,8 +181,8 @@ class SecureWebUI:
 
                     # Validate cookies format
                     if not CookieFileProcessor.validate_cookies_file(cookies_content):
-                        has_cookies = self.settings_manager.has_cookies(access_token.user_id)
-                        has_openai_key = self.settings_manager.has_openai_api_key(access_token.user_id)
+                        has_cookies = self.settings_manager.has_cookies(access_token.user_id, team_id=team_id)
+                        has_openai_key = self.settings_manager.has_openai_api_key(access_token.user_id, team_id=team_id)
                         local_allowed = True
                         if self.workflow_config and hasattr(self.workflow_config, 'is_local_whisper_allowed'):
                             local_allowed = self.workflow_config.is_local_whisper_allowed(access_token.user_id)
@@ -192,14 +196,14 @@ class SecureWebUI:
                             messages=[{'category': 'error', 'message': 'Invalid cookies file format. Please upload a Netscape HTTP Cookie file (cookies.txt).'}]
                         ), 400
 
-                    # Extract YouTube cookies and store
+                    # Extract YouTube cookies and store (with team_id)
                     youtube_cookies = CookieFileProcessor.extract_youtube_cookies(cookies_content)
-                    self.settings_manager.store_cookies(access_token.user_id, youtube_cookies)
-                    logger.info(f"Cookies uploaded via web UI for user {access_token.user_id}")
+                    self.settings_manager.store_cookies(access_token.user_id, youtube_cookies, team_id=team_id)
+                    logger.info(f"Cookies uploaded via web UI for user {access_token.user_id} in team {team_id}")
 
                 except UnicodeDecodeError:
-                    has_cookies = self.settings_manager.has_cookies(access_token.user_id)
-                    has_openai_key = self.settings_manager.has_openai_api_key(access_token.user_id)
+                    has_cookies = self.settings_manager.has_cookies(access_token.user_id, team_id=team_id)
+                    has_openai_key = self.settings_manager.has_openai_api_key(access_token.user_id, team_id=team_id)
                     local_allowed = True
                     if self.workflow_config and hasattr(self.workflow_config, 'is_local_whisper_allowed'):
                         local_allowed = self.workflow_config.is_local_whisper_allowed(access_token.user_id)
@@ -213,18 +217,18 @@ class SecureWebUI:
                         messages=[{'category': 'error', 'message': 'Invalid file encoding. Please upload a text file.'}]
                     ), 400
 
-            # Store updated settings
-            self.settings_manager.store_settings(access_token.user_id, settings)
+            # Store updated settings (with team_id)
+            self.settings_manager.store_settings(access_token.user_id, settings, team_id=team_id)
 
-            # Generate new token for continued access
-            new_token = self.token_manager.generate_token(access_token.user_id, single_use=False)
+            # Generate new token for continued access (with team_id)
+            new_token = self.token_manager.generate_token(access_token.user_id, single_use=False, team_id=team_id)
             return redirect(f'/settings/{new_token.token}?success=settings_saved')
-            
+
         except Exception as e:
             logger.error(f"Error saving settings: {e}")
             return render_template_string(ERROR_TEMPLATE,
                 title="Error",
-                error_title="Settings Save Error", 
+                error_title="Settings Save Error",
                 error_message="An error occurred while saving your settings. Please try again."
             ), 500
     
