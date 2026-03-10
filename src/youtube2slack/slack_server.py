@@ -571,7 +571,10 @@ class SlackServer:
         """
         try:
             vad_processor = self._create_stream_processor(user_id, team_id=team_id)
-            
+
+            # Get user-specific cookies for yt-dlp video info extraction
+            user_cookies_file = self.workflow_config.get_cookies_file_for_user(user_id, team_id=team_id)
+
             # Create thread first
             import yt_dlp
             ydl_opts = {

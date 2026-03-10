@@ -1,13 +1,13 @@
 """Streaming processor using Silero VAD + ReazonSpeech K2 via sherpa-onnx."""
 
 import os
+import queue
 import re
 import threading
-import time
 import subprocess
 import logging
 import numpy as np
-from typing import Dict, Optional, Any, Callable, List
+from typing import Dict, Optional, Any, Callable
 
 import sherpa_onnx
 
@@ -36,6 +36,9 @@ class ReazonSpeechStreamProcessor:
     Replaces VADStreamProcessor with sherpa-onnx based pipeline:
     - Silero VAD for speech detection (replaces webrtcvad)
     - ReazonSpeech K2 OfflineRecognizer for transcription (replaces Whisper)
+
+    Uses a queue to decouple audio capture from transcription,
+    preventing backpressure from blocking ffmpeg reads.
     """
 
     def __init__(self, model_dir: str, vad_model_path: str,
@@ -70,7 +73,7 @@ class ReazonSpeechStreamProcessor:
             use_int8=use_int8,
         )
 
-        # Create Silero VAD
+        # Create Silero VAD config
         vad_config = sherpa_onnx.VadModelConfig()
         vad_config.silero_vad.model = vad_model_path
         vad_config.silero_vad.threshold = vad_threshold
@@ -83,6 +86,13 @@ class ReazonSpeechStreamProcessor:
         self.is_running = False
         self.stream_info = {}
         self.progress_callback = None
+
+        # Queue for decoupling capture from transcription
+        self.segment_queue = queue.Queue()
+        self.processing_thread = None
+
+        # Lock for text buffer access
+        self._lock = threading.RLock()
 
         # Text buffering for sentence detection
         self.text_buffer = ""
@@ -98,6 +108,9 @@ class ReazonSpeechStreamProcessor:
         Args:
             stream_url: YouTube live stream URL
             progress_callback: Callback for posting transcription results
+
+        Raises:
+            ReazonSpeechStreamProcessingError: On any failure
         """
         if self.is_running:
             raise ReazonSpeechStreamProcessingError("Stream processing already running")
@@ -109,8 +122,19 @@ class ReazonSpeechStreamProcessor:
         logger.info(f"Starting ReazonSpeech processing of: "
                      f"{self.stream_info.get('title', 'Unknown Stream')}")
 
-        # Start continuous audio streaming with VAD + recognition
-        self._start_stream_capture(stream_url)
+        # Start background worker thread for transcription
+        self.processing_thread = threading.Thread(
+            target=self._transcription_worker,
+            daemon=True,
+        )
+        self.processing_thread.start()
+
+        # Start audio capture (blocks until stream ends or stop)
+        try:
+            self._start_stream_capture(stream_url)
+        except Exception:
+            self.is_running = False
+            raise
 
     def _get_stream_info(self, stream_url: str) -> Dict[str, Any]:
         """Get stream information without downloading."""
@@ -221,7 +245,7 @@ class ReazonSpeechStreamProcessor:
             logger.info("Starting continuous FFmpeg audio stream...")
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-            self._process_stream(process)
+            self._capture_and_vad(process)
 
         except ReazonSpeechStreamProcessingError:
             raise
@@ -229,69 +253,86 @@ class ReazonSpeechStreamProcessor:
             logger.error(f"Stream capture failed: {e}")
             raise ReazonSpeechStreamProcessingError(f"Stream capture failed: {e}")
 
-    def _process_stream(self, process: subprocess.Popen) -> None:
-        """Process audio stream with Silero VAD and ReazonSpeech K2.
+    def _capture_and_vad(self, process: subprocess.Popen) -> None:
+        """Capture audio from ffmpeg and run VAD, enqueuing speech segments.
 
-        Reads raw PCM from ffmpeg, feeds to Silero VAD, and when VAD
-        detects complete speech segments, transcribes them with ReazonSpeech.
+        This runs in the main processing thread. Speech segments detected
+        by VAD are put into segment_queue for the worker thread to transcribe.
         """
-        # Create fresh VAD for this stream session
         vad = sherpa_onnx.VoiceActivityDetector(self.vad_config, buffer_size_in_seconds=100)
 
         try:
             while self.is_running and process.poll() is None:
-                # Read one VAD window (512 samples = 1024 bytes of int16)
                 raw_data = process.stdout.read(VAD_WINDOW_BYTES)
                 if not raw_data or len(raw_data) < VAD_WINDOW_BYTES:
                     break
 
-                # Convert int16 PCM to float32
                 samples = np.frombuffer(raw_data, dtype=np.int16).astype(np.float32) / 32768.0
-
-                # Feed to VAD
                 vad.accept_waveform(samples)
 
-                # Process any complete speech segments detected by VAD
+                # Drain any completed speech segments into the queue
                 while not vad.empty():
-                    speech_samples = vad.front.samples
+                    speech_samples = vad.front.samples.copy()
                     vad.pop()
-
                     duration = len(speech_samples) / SAMPLE_RATE
                     logger.info(f"VAD detected speech segment: {duration:.2f}s")
+                    self.segment_queue.put(speech_samples)
 
-                    # Transcribe the speech segment
-                    self._transcribe_and_post(speech_samples)
+            # Flush VAD to capture any remaining speech at stream end
+            vad.flush()
+            while not vad.empty():
+                speech_samples = vad.front.samples.copy()
+                vad.pop()
+                duration = len(speech_samples) / SAMPLE_RATE
+                logger.info(f"VAD flush: speech segment: {duration:.2f}s")
+                self.segment_queue.put(speech_samples)
 
         except Exception as e:
-            logger.error(f"Stream processing failed: {e}")
+            self.is_running = False
+            raise ReazonSpeechStreamProcessingError(
+                f"Stream processing failed: {e}"
+            ) from e
         finally:
+            self.is_running = False
             if process.poll() is None:
                 process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
 
-    def _transcribe_and_post(self, samples: np.ndarray) -> None:
-        """Transcribe audio samples and post results.
+    def _transcription_worker(self) -> None:
+        """Background worker that transcribes queued speech segments."""
+        while self.is_running or not self.segment_queue.empty():
+            try:
+                samples = self.segment_queue.get(timeout=2)
+            except queue.Empty:
+                continue
 
-        Args:
-            samples: float32 audio samples at 16kHz
-        """
-        try:
-            stream = self.transcriber.recognizer.create_stream()
-            stream.accept_waveform(SAMPLE_RATE, samples)
-            self.transcriber.recognizer.decode_stream(stream)
+            try:
+                stream = self.transcriber.recognizer.create_stream()
+                stream.accept_waveform(SAMPLE_RATE, samples)
+                self.transcriber.recognizer.decode_stream(stream)
+                text = stream.result.text.strip()
 
-            text = stream.result.text.strip()
+                if text:
+                    logger.info(f"Transcription: {text[:80]}...")
+                    with self._lock:
+                        if self.is_running:
+                            self._process_transcription(text)
+                else:
+                    logger.debug("Empty transcription result, skipping")
 
-            if text:
-                logger.info(f"Transcription: {text[:80]}...")
-                self._process_transcription(text)
-            else:
-                logger.debug("Empty transcription result, skipping")
-
-        except Exception as e:
-            logger.error(f"Transcription failed: {e}")
+            except Exception as e:
+                logger.error(f"Transcription failed: {e}")
+            finally:
+                self.segment_queue.task_done()
 
     def _process_transcription(self, text: str) -> None:
-        """Process transcription text and detect sentence boundaries."""
+        """Process transcription text and detect sentence boundaries.
+
+        Caller must hold self._lock.
+        """
         self.text_buffer += text + " "
 
         # Find and post complete sentences
@@ -339,10 +380,15 @@ class ReazonSpeechStreamProcessor:
             logger.info("Stopping ReazonSpeech stream processing...")
             self.is_running = False
 
-            # Flush remaining text buffer
-            if self.text_buffer.strip():
-                self._post_sentence(self.text_buffer.strip())
-                self.text_buffer = ""
+            # Wait for worker thread to finish processing remaining segments
+            if self.processing_thread and self.processing_thread.is_alive():
+                self.processing_thread.join(timeout=10)
+
+            # Flush remaining text buffer under lock
+            with self._lock:
+                if self.text_buffer.strip():
+                    self._post_sentence(self.text_buffer.strip())
+                    self.text_buffer = ""
 
             logger.info("ReazonSpeech stream processing stopped")
 
@@ -351,6 +397,7 @@ class ReazonSpeechStreamProcessor:
         return {
             "is_running": self.is_running,
             "stream_info": self.stream_info,
+            "pending_segments": self.segment_queue.qsize(),
             "text_buffer_length": len(self.text_buffer),
             "transcriber": "reazonspeech-k2",
         }
