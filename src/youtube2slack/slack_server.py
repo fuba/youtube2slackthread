@@ -65,6 +65,36 @@ class SlackServer:
             db_path = os.environ.get('WEB_TOKENS_DB_PATH', 'web_tokens.db')
             self.token_manager = WebTokenManager(db_path=db_path, token_lifetime_hours=1)
         
+    def _create_stream_processor(self, user_id: str, team_id: Optional[str] = None):
+        """Create a stream processor based on the configured engine.
+
+        Returns either a ReazonSpeechStreamProcessor or a VADStreamProcessor
+        depending on workflow_config.transcriber_engine.
+        """
+        user_cookies_file = self.workflow_config.get_cookies_file_for_user(user_id, team_id=team_id)
+
+        if self.workflow_config.transcriber_engine == "reazonspeech":
+            from .reazonspeech_stream_processor import ReazonSpeechStreamProcessor
+            return ReazonSpeechStreamProcessor(
+                model_dir=self.workflow_config.reazonspeech_model_dir,
+                vad_model_path=self.workflow_config.reazonspeech_vad_model,
+                num_threads=self.workflow_config.reazonspeech_num_threads,
+                use_int8=self.workflow_config.reazonspeech_use_int8,
+                cookies_file=user_cookies_file,
+                user_id=user_id,
+            )
+        else:
+            from .vad_stream_processor import VADStreamProcessor
+            user_settings = self.workflow_config.settings_manager.get_settings(user_id, team_id=team_id)
+            transcriber = TranscriberFactory.create_transcriber(
+                user_settings, self.workflow_config, user_id
+            )
+            return VADStreamProcessor(
+                transcriber=transcriber,
+                cookies_file=user_cookies_file,
+                user_id=user_id,
+            )
+
     def setup_routes(self):
         """Setup Flask routes."""
         
@@ -540,21 +570,7 @@ class SlackServer:
             team_id: Slack team ID (for multi-workspace support)
         """
         try:
-            from .vad_stream_processor import VADStreamProcessor
-
-            # Create transcriber based on user settings (with team_id)
-            user_settings = self.workflow_config.settings_manager.get_settings(user_id, team_id=team_id)
-            transcriber = TranscriberFactory.create_transcriber(user_settings, self.workflow_config, user_id)
-
-            # Get user-specific cookies if available (with team_id)
-            user_cookies_file = self.workflow_config.get_cookies_file_for_user(user_id, team_id=team_id)
-            
-            # Create VAD processor with user-specific cookies
-            vad_processor = VADStreamProcessor(
-                transcriber=transcriber,
-                cookies_file=user_cookies_file,
-                user_id=user_id
-            )
+            vad_processor = self._create_stream_processor(user_id, team_id=team_id)
             
             # Create thread first
             import yt_dlp
@@ -1025,21 +1041,8 @@ class SlackServer:
                 initial_message="Retry processing"
             )
             
-            # Create transcriber based on user settings
-            user_settings = self.workflow_config.settings_manager.get_settings(user_id)
-            transcriber = TranscriberFactory.create_transcriber(user_settings, self.workflow_config, user_id)
-            
-            # Get user-specific cookies if available
-            user_cookies_file = self.workflow_config.get_cookies_file_for_user(user_id)
-            
-            # Create VAD processor with user-specific cookies
-            from .vad_stream_processor import VADStreamProcessor
-            vad_processor = VADStreamProcessor(
-                transcriber=transcriber,
-                cookies_file=user_cookies_file,
-                user_id=user_id
-            )
-            
+            vad_processor = self._create_stream_processor(user_id)
+
             # Record active stream info
             stream_info = ActiveStreamInfo(
                 thread_info=thread_info,
@@ -1101,22 +1104,7 @@ class SlackServer:
             stream_info.error_message = None
             stream_info.processor = None  # Will be set by new processor
             
-            # Use same logic as original processing
-            from .vad_stream_processor import VADStreamProcessor
-            
-            # Create transcriber based on user settings
-            user_settings = self.workflow_config.settings_manager.get_settings(stream_info.user_id)
-            transcriber = TranscriberFactory.create_transcriber(user_settings, self.workflow_config)
-            
-            # Get user-specific cookies if available
-            user_cookies_file = self.workflow_config.get_cookies_file_for_user(stream_info.user_id)
-            
-            # Create VAD processor with user-specific cookies
-            vad_processor = VADStreamProcessor(
-                transcriber=transcriber,
-                cookies_file=user_cookies_file,
-                user_id=stream_info.user_id
-            )
+            vad_processor = self._create_stream_processor(stream_info.user_id)
             
             # Update processor in stream info
             stream_info.processor = vad_processor

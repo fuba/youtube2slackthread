@@ -10,6 +10,19 @@ whisper:
   model: "medium"                   # Whisper model (tiny, base, small, medium, large) 
   device: "cuda"                    # Device to use (cpu, cuda, or null for auto)
   language: null                     # Language code (en, ja, etc. or null for auto-detect)
+  allowed_local_users:              # Slack User IDs allowed to use local Whisper
+    - "U4ZJ84GQ3"                   # fuba
+    # - "U0987654321"               # Add more user IDs as needed
+  # If allowed_local_users is empty or null, all users can use local Whisper
+  # If specified, only listed users can use local Whisper (others must use OpenAI API)
+
+transcriber_engine: "reazonspeech"  # "whisper" or "reazonspeech"
+
+reazonspeech:
+  model_dir: "./models/sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01"
+  vad_model: "./models/silero_vad.onnx"
+  num_threads: 2
+  use_int8: true
 
 slack:
   webhook_url: null                  # Legacy webhook URL (not used in current implementation)

@@ -15,6 +15,17 @@ whisper:
   # If allowed_local_users is empty or null, all users can use local Whisper
   # If specified, only listed users can use local Whisper (others must use OpenAI API)
 
+# Transcriber engine: "whisper" (OpenAI Whisper) or "reazonspeech" (ReazonSpeech K2 + sherpa-onnx)
+# "reazonspeech" is recommended for Japanese - faster, lower memory, no GPU required
+transcriber_engine: "whisper"
+
+reazonspeech:
+  model_dir: "./models/sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01"
+  vad_model: "./models/silero_vad.onnx"
+  num_threads: 2                   # CPU threads for inference
+  use_int8: true                   # Use int8 quantized model (~154MB vs ~588MB)
+  # Download models: bash scripts/download_reazonspeech_model.sh
+
 slack:
   webhook_url: "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
   channel: null                      # Optional channel override (e.g., "#transcripts")
