@@ -35,11 +35,15 @@ class SecureWebUI:
     def _setup_routes(self):
         """Setup Flask routes."""
         
+        @self.app.route('/health')
+        def health():
+            return 'ok', 200
+
         @self.app.route('/')
         def home():
             return render_template_string(ERROR_TEMPLATE,
                 title="YouTube2SlackThread Settings",
-                error_title="Direct Access Not Allowed", 
+                error_title="Direct Access Not Allowed",
                 error_message="This is a secure settings interface. Access is only available through temporary URLs issued via Slack DM."
             ), 403
         
