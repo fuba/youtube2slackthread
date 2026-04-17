@@ -28,6 +28,31 @@ RUN mkdir -p downloads logs && chown -R app:app downloads logs
 # Install dependencies (as root for caching, then fix permissions)
 RUN uv sync --frozen --no-dev && chown -R app:app .venv
 
+# Link onnxruntime shared library for sherpa-onnx (fail-fast if not found)
+RUN .venv/bin/python3 - <<'PY' \
+import pathlib, sysconfig \
+site = pathlib.Path(".venv/lib").glob("python*/site-packages") \
+site = next(site) \
+capi = site / "onnxruntime" / "capi" \
+lib = next(capi.glob("libonnxruntime.so.*"), None) \
+if lib is None: \
+    raise SystemExit("onnxruntime shared library not found") \
+sherpa_lib = site / "sherpa_onnx" / "lib" \
+target = sherpa_lib / "libonnxruntime.so" \
+if not target.exists(): \
+    target.symlink_to(lib) \
+print(f"linked {target} -> {lib}") \
+PY
+
+# Set library path for sherpa-onnx + onnxruntime
+ENV LD_LIBRARY_PATH="/app/.venv/lib/python3.11/site-packages/onnxruntime/capi:/app/.venv/lib/python3.11/site-packages/sherpa_onnx/lib:${LD_LIBRARY_PATH}"
+
+# Verify sherpa-onnx can be imported
+RUN .venv/bin/python3 -c "import sherpa_onnx"
+
+# Create models directory for ReazonSpeech
+RUN mkdir -p models && chown -R app:app models
+
 # Switch to app user
 USER app
 

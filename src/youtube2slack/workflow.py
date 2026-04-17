@@ -30,6 +30,13 @@ class WorkflowConfig:
     whisper_download_root: Optional[str] = None
     allowed_local_users: Optional[List[str]] = None  # Slack User IDs allowed to use local Whisper
     
+    # ReazonSpeech settings
+    reazonspeech_model_dir: Optional[str] = None
+    reazonspeech_vad_model: Optional[str] = None
+    reazonspeech_num_threads: int = 2
+    reazonspeech_use_int8: bool = True
+    transcriber_engine: str = "whisper"  # "whisper" or "reazonspeech"
+
     # Slack settings
     slack_webhook: Optional[str] = None
     slack_channel: Optional[str] = None
@@ -106,6 +113,7 @@ class WorkflowConfig:
         """
         youtube_config = config_dict.get('youtube', {})
         whisper_config = config_dict.get('whisper', {})
+        reazonspeech_config = config_dict.get('reazonspeech', {})
         slack_config = config_dict.get('slack', {})
         
         # Initialize settings manager (includes cookie management) from environment variable
@@ -138,6 +146,13 @@ class WorkflowConfig:
             whisper_download_root=whisper_config.get('download_root'),
             allowed_local_users=whisper_config.get('allowed_local_users'),
             
+            # ReazonSpeech settings
+            reazonspeech_model_dir=reazonspeech_config.get('model_dir'),
+            reazonspeech_vad_model=reazonspeech_config.get('vad_model'),
+            reazonspeech_num_threads=reazonspeech_config.get('num_threads', 2),
+            reazonspeech_use_int8=reazonspeech_config.get('use_int8', True),
+            transcriber_engine=config_dict.get('transcriber_engine', 'whisper'),
+
             # Slack settings
             slack_webhook=slack_config.get('webhook_url'),
             slack_channel=slack_config.get('channel'),
