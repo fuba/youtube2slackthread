@@ -29,6 +29,25 @@ class WorkflowConfig:
     whisper_language: Optional[str] = None
     whisper_download_root: Optional[str] = None
     allowed_local_users: Optional[List[str]] = None  # Slack User IDs allowed to use local Whisper
+
+    # Optional inference services; endpoints and credentials are never inferred from user input.
+    asr_backend: str = "whisper"
+    asr_base_url: Optional[str] = None
+    asr_model: Optional[str] = None
+    asr_api_key_env: Optional[str] = None
+    translation_target_language: Optional[str] = None
+    translation_base_url: Optional[str] = None
+    translation_model: Optional[str] = None
+    translation_api_key_env: Optional[str] = None
+    translation_max_tokens: int = 1024
+    semantic_segmentation: bool = False
+    segmentation_base_url: Optional[str] = None
+    segmentation_model: Optional[str] = None
+    segmentation_api_key_env: Optional[str] = None
+    pause_duration: float = 0.25
+    max_silence_duration: float = 1.5
+    max_segment_duration: float = 12.0
+    inference_timeout: float = 60.0
     
     # Slack settings
     slack_webhook: Optional[str] = None
@@ -40,6 +59,31 @@ class WorkflowConfig:
     settings_manager: Optional[UserSettingsManager] = None
     cookie_manager: Optional[UserCookieManager] = None  # Backward compatibility
     enable_user_cookies: bool = True
+
+    def stream_processor_options(self) -> Dict[str, Any]:
+        """Build opt-in services without reusing a user's unrelated API credentials."""
+        from .speech_services import ChatService, Translator, EndpointDetector
+
+        translator = None
+        detector = None
+        if self.translation_target_language:
+            translator = Translator(ChatService(
+                self.translation_base_url, self.translation_model,
+                self.translation_api_key_env, self.inference_timeout,
+                self.translation_max_tokens,
+            ), self.translation_target_language)
+        if self.semantic_segmentation:
+            detector = EndpointDetector(ChatService(
+                self.segmentation_base_url, self.segmentation_model,
+                self.segmentation_api_key_env, self.inference_timeout,
+                max_tokens=128,
+            ))
+        return dict(
+            translator=translator, endpoint_detector=detector,
+            language=self.whisper_language, pause_duration=self.pause_duration,
+            max_silence_duration=self.max_silence_duration,
+            max_segment_duration=self.max_segment_duration,
+        )
     
     def get_cookies_file_for_user(self, user_id: Optional[str] = None,
                                    team_id: Optional[str] = None) -> Optional[str]:
@@ -107,6 +151,9 @@ class WorkflowConfig:
         youtube_config = config_dict.get('youtube', {})
         whisper_config = config_dict.get('whisper', {})
         slack_config = config_dict.get('slack', {})
+        asr_config = config_dict.get('asr', {})
+        translation_config = config_dict.get('translation', {})
+        segmentation_config = config_dict.get('segmentation', {})
         
         # Initialize settings manager (includes cookie management) from environment variable
         settings_manager = None
@@ -137,6 +184,24 @@ class WorkflowConfig:
             whisper_language=whisper_config.get('language'),
             whisper_download_root=whisper_config.get('download_root'),
             allowed_local_users=whisper_config.get('allowed_local_users'),
+
+            asr_backend=asr_config.get('backend', 'whisper'),
+            asr_base_url=asr_config.get('base_url'),
+            asr_model=asr_config.get('model'),
+            asr_api_key_env=asr_config.get('api_key_env'),
+            translation_target_language=translation_config.get('target_language'),
+            translation_base_url=translation_config.get('base_url'),
+            translation_model=translation_config.get('model'),
+            translation_api_key_env=translation_config.get('api_key_env'),
+            translation_max_tokens=translation_config.get('max_tokens', 1024),
+            semantic_segmentation=segmentation_config.get('semantic', False),
+            segmentation_base_url=segmentation_config.get('base_url'),
+            segmentation_model=segmentation_config.get('model'),
+            segmentation_api_key_env=segmentation_config.get('api_key_env'),
+            pause_duration=segmentation_config.get('pause_duration', 0.25),
+            max_silence_duration=segmentation_config.get('max_silence_duration', 1.5),
+            max_segment_duration=segmentation_config.get('max_segment_duration', 12.0),
+            inference_timeout=config_dict.get('inference_timeout', 60.0),
             
             # Slack settings
             slack_webhook=slack_config.get('webhook_url'),

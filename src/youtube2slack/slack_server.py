@@ -3,6 +3,7 @@
 import os
 import json
 import logging
+from html import escape
 from typing import Dict, Any, Optional
 import threading
 import time
@@ -553,7 +554,8 @@ class SlackServer:
             vad_processor = VADStreamProcessor(
                 transcriber=transcriber,
                 cookies_file=user_cookies_file,
-                user_id=user_id
+                user_id=user_id,
+                **self.workflow_config.stream_processor_options(),
             )
             
             # Create thread first
@@ -620,18 +622,11 @@ class SlackServer:
             
             # Start processing with callback to post to our thread
             def progress_callback(message: str):
-                # Filter out progress messages - only post actual transcription content
-                if (message.strip() and 
-                    not message.startswith("Processing speech segment") and
-                    not message.startswith("Processing continuous audio stream") and
-                    not message.startswith("Starting VAD stream")):
-                    try:
-                        self.bot_client.post_to_thread(thread_info, message)
-                        logger.info(f"Posted to thread: {message[:50]}...")
-                    except Exception as e:
-                        logger.error(f"Failed to post to thread: {e}")
+                if message.strip():
+                    self.bot_client.post_to_thread(thread_info, escape(message, quote=False))
             
             vad_processor.start_stream_processing(video_url, progress_callback)
+            stream_info.is_running = False
             
         except Exception as e:
             logger.error(f"VAD processing error: {e}")
@@ -931,11 +926,7 @@ class SlackServer:
             
             # Stop the processor if running
             if stream_info.processor and hasattr(stream_info.processor, 'stop_processing'):
-                try:
-                    stream_info.processor.stop_processing()
-                    logger.info("Successfully called stop_processing on processor")
-                except Exception as e:
-                    logger.warning(f"Error calling stop_processing: {e}")
+                stream_info.processor.stop_processing()
             
             # Update stream status
             stream_info.is_running = False
@@ -953,7 +944,6 @@ class SlackServer:
             logger.error(f"Failed to stop stream processing: {e}")
             
             # Update error state
-            stream_info.is_running = False
             stream_info.error_message = f"Stop failed: {str(e)}"
             
             try:
@@ -1037,7 +1027,8 @@ class SlackServer:
             vad_processor = VADStreamProcessor(
                 transcriber=transcriber,
                 cookies_file=user_cookies_file,
-                user_id=user_id
+                user_id=user_id,
+                **self.workflow_config.stream_processor_options(),
             )
             
             # Record active stream info
@@ -1053,18 +1044,12 @@ class SlackServer:
             
             # Progress callback
             def progress_callback(message: str):
-                if (message.strip() and 
-                    not message.startswith("Processing speech segment") and
-                    not message.startswith("Processing continuous audio stream") and
-                    not message.startswith("Starting VAD stream")):
-                    try:
-                        self.bot_client.post_to_thread(thread_info, message)
-                        logger.info(f"Posted to thread: {message[:50]}...")
-                    except Exception as e:
-                        logger.error(f"Failed to post to thread: {e}")
+                if message.strip():
+                    self.bot_client.post_to_thread(thread_info, escape(message, quote=False))
             
             # Start processing
             vad_processor.start_stream_processing(video_url, progress_callback)
+            stream_info.is_running = False
             
             logger.info(f"Successfully started retry processing for thread {thread_ts}")
             
@@ -1086,15 +1071,14 @@ class SlackServer:
                 
     def _restart_stream_processing(self, stream_info: ActiveStreamInfo, retry_user_id: str) -> None:
         """Restart stream processing for a thread."""
+        previous_stopped = False
         try:
             logger.info(f"Restarting stream processing for {stream_info.video_url}")
             
             # Stop existing processor if still running
             if stream_info.processor and hasattr(stream_info.processor, 'stop_processing'):
-                try:
-                    stream_info.processor.stop_processing()
-                except Exception as e:
-                    logger.warning(f"Error stopping existing processor: {e}")
+                stream_info.processor.stop_processing()
+            previous_stopped = True
             
             # Update stream info
             stream_info.is_running = True
@@ -1106,7 +1090,7 @@ class SlackServer:
             
             # Create transcriber based on user settings
             user_settings = self.workflow_config.settings_manager.get_settings(stream_info.user_id)
-            transcriber = TranscriberFactory.create_transcriber(user_settings, self.workflow_config)
+            transcriber = TranscriberFactory.create_transcriber(user_settings, self.workflow_config, stream_info.user_id)
             
             # Get user-specific cookies if available
             user_cookies_file = self.workflow_config.get_cookies_file_for_user(stream_info.user_id)
@@ -1115,7 +1099,8 @@ class SlackServer:
             vad_processor = VADStreamProcessor(
                 transcriber=transcriber,
                 cookies_file=user_cookies_file,
-                user_id=stream_info.user_id
+                user_id=stream_info.user_id,
+                **self.workflow_config.stream_processor_options(),
             )
             
             # Update processor in stream info
@@ -1123,18 +1108,12 @@ class SlackServer:
             
             # Progress callback
             def progress_callback(message: str):
-                if (message.strip() and 
-                    not message.startswith("Processing speech segment") and
-                    not message.startswith("Processing continuous audio stream") and
-                    not message.startswith("Starting VAD stream")):
-                    try:
-                        self.bot_client.post_to_thread(stream_info.thread_info, message)
-                        logger.info(f"Posted to thread: {message[:50]}...")
-                    except Exception as e:
-                        logger.error(f"Failed to post to thread: {e}")
+                if message.strip():
+                    self.bot_client.post_to_thread(stream_info.thread_info, escape(message, quote=False))
             
             # Start processing
             vad_processor.start_stream_processing(stream_info.video_url, progress_callback)
+            stream_info.is_running = False
             
             logger.info(f"Successfully restarted stream processing for thread {stream_info.thread_info.thread_ts}")
             
@@ -1142,7 +1121,8 @@ class SlackServer:
             logger.error(f"Failed to restart stream processing: {e}")
             
             # Update error state
-            stream_info.is_running = False
+            if previous_stopped:
+                stream_info.is_running = False
             stream_info.error_message = str(e)
             
             try:

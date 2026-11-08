@@ -208,6 +208,7 @@ class TestTranscriberFactory:
             # Config without permission method - should allow local
             basic_config = Mock()
             basic_config.whisper_device = "cuda"
+            basic_config.asr_backend = "whisper"
             # No is_local_whisper_allowed method
             
             result = TranscriberFactory.create_transcriber(user_settings, basic_config, "test_user")

@@ -129,7 +129,7 @@ class TestWorkflowPermissions:
         # Should use settings manager
         result = config.get_cookies_file_for_user("test_user")
         assert result == "/tmp/user_cookies.txt"
-        mock_settings_manager.get_cookies_file_path.assert_called_once_with("test_user")
+        mock_settings_manager.get_cookies_file_path.assert_called_once_with("test_user", team_id=None)
     
     def test_get_cookies_file_fallback_to_cookie_manager(self):
         """Test fallback to cookie_manager when settings_manager is None."""
@@ -146,7 +146,7 @@ class TestWorkflowPermissions:
         # Should fall back to cookie manager
         result = config.get_cookies_file_for_user("test_user")
         assert result == "/tmp/legacy_cookies.txt"
-        mock_cookie_manager.get_cookies_file_path.assert_called_once_with("test_user")
+        mock_cookie_manager.get_cookies_file_path.assert_called_once_with("test_user", team_id=None)
     
     def test_get_cookies_file_no_user_cookies(self):
         """Test default cookies when user cookies disabled."""
@@ -167,7 +167,7 @@ class TestWorkflowPermissions:
         config = WorkflowConfig(settings_manager=mock_settings_manager)
         config.cleanup_user_temp_files("test_user")
         
-        mock_settings_manager.cleanup_temp_files.assert_called_once_with("test_user")
+        mock_settings_manager.cleanup_temp_files.assert_called_once_with("test_user", team_id=None)
     
     def test_cleanup_user_temp_files_fallback(self):
         """Test cleanup fallback to cookie manager."""
@@ -179,7 +179,7 @@ class TestWorkflowPermissions:
         )
         config.cleanup_user_temp_files("test_user")
         
-        mock_cookie_manager.cleanup_temp_files.assert_called_once_with("test_user")
+        mock_cookie_manager.cleanup_temp_files.assert_called_once_with("test_user", team_id=None)
 
 
 class TestWorkflowConfigYAMLIntegration:
@@ -263,10 +263,10 @@ class TestBackwardCompatibility:
         
         # Should still work for backward compatibility
         config.get_cookies_file_for_user("test_user")
-        mock_cookie_manager.get_cookies_file_path.assert_called_once_with("test_user")
+        mock_cookie_manager.get_cookies_file_path.assert_called_once_with("test_user", team_id=None)
         
         config.cleanup_user_temp_files("test_user")
-        mock_cookie_manager.cleanup_temp_files.assert_called_once_with("test_user")
+        mock_cookie_manager.cleanup_temp_files.assert_called_once_with("test_user", team_id=None)
     
     def test_settings_manager_takes_precedence(self):
         """Test that settings_manager takes precedence over cookie_manager."""

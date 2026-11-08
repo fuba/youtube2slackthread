@@ -531,6 +531,18 @@ class TranscriberFactory:
         local_whisper_allowed = True
         if fallback_config and hasattr(fallback_config, 'is_local_whisper_allowed') and user_id:
             local_whisper_allowed = fallback_config.is_local_whisper_allowed(user_id)
+
+        backend = getattr(fallback_config, 'asr_backend', 'whisper')
+        if backend not in ('whisper', 'compatible'):
+            raise TranscriptionError('Unknown ASR backend')
+        if backend == 'compatible' and user_settings.whisper_service == WhisperService.LOCAL:
+            if not local_whisper_allowed or (fallback_config.allowed_local_users and not user_id):
+                raise TranscriptionError('Configured ASR access restricted for this user.')
+            from .speech_services import CompatibleASR
+            return CompatibleASR(
+                fallback_config.asr_base_url, fallback_config.asr_model,
+                fallback_config.asr_api_key_env, fallback_config.inference_timeout,
+            )
         
         if user_settings.whisper_service == WhisperService.OPENAI:
             # Try OpenAI API transcriber

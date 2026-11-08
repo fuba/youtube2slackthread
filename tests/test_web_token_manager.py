@@ -246,7 +246,7 @@ class TestWebTokenManager:
             cursor = conn.execute("PRAGMA table_info(web_tokens)")
             columns = [column[1] for column in cursor.fetchall()]
             
-            expected_columns = ['token', 'user_id', 'created_at', 'expires_at', 'used_at', 'is_valid']
+            expected_columns = ['token', 'user_id', 'team_id', 'created_at', 'expires_at', 'used_at', 'is_valid']
             for col in expected_columns:
                 assert col in columns
             
@@ -254,7 +254,9 @@ class TestWebTokenManager:
             cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='index'")
             index_names = [row[0] for row in cursor.fetchall()]
             
-            assert 'idx_user_tokens' in index_names
+            assert 'idx_user_team_tokens' in index_names
+            index_columns = conn.execute('PRAGMA index_info(idx_user_team_tokens)').fetchall()
+            assert [column[2] for column in index_columns] == ['team_id', 'user_id', 'expires_at']
             assert 'idx_expires_at' in index_names
 
 
@@ -269,6 +271,7 @@ class TestWebAccessToken:
         token = WebAccessToken(
             token="test_token_123",
             user_id="user_456",
+            team_id="team_123",
             created_at=now,
             expires_at=expires,
             used_at=None,
@@ -277,6 +280,7 @@ class TestWebAccessToken:
         
         assert token.token == "test_token_123"
         assert token.user_id == "user_456"
+        assert token.team_id == "team_123"
         assert token.created_at == now
         assert token.expires_at == expires
         assert token.used_at is None
@@ -290,6 +294,7 @@ class TestWebAccessToken:
         token = WebAccessToken(
             token="test_token",
             user_id="test_user",
+            team_id="_default_",
             created_at=now,
             expires_at=expires
         )
