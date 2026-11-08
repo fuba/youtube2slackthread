@@ -15,6 +15,32 @@ whisper:
   # If allowed_local_users is empty or null, all users can use local Whisper
   # If specified, only listed users can use local Whisper (others must use OpenAI API)
 
+# Optional transcription endpoint for comparing models without replacing Whisper.
+asr:
+  backend: "whisper"                 # whisper (existing local/user API choice) or compatible
+  base_url: null                    # Compatible /v1 base URL; required for compatible
+  model: null                       # Served model ID, e.g. Qwen/Qwen3-ASR-0.6B or 1.7B
+  api_key_env: null                  # Name of an environment variable, never a literal key
+
+# Translation is disabled until a target language and an explicit service are set.
+translation:
+  target_language: null             # e.g. ja, en, en-US
+  base_url: null                    # Compatible /v1 base URL
+  model: null                       # Model supporting system/user chat messages
+  api_key_env: null
+  max_tokens: 1024                  # Hitting the limit is a tracked failure, without automatic retry
+
+segmentation:
+  semantic: false                   # Optional chat-based sentence/clause endpoint decision
+  base_url: null
+  model: null
+  api_key_env: null
+  pause_duration: 0.25              # One endpoint candidate per pause, never every second
+  max_silence_duration: 1.5          # Independent silence fallback
+  max_segment_duration: 12.0        # Independent hard limit, measured using audio samples
+
+inference_timeout: 60               # Per-service read timeout in seconds
+
 slack:
   webhook_url: "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
   channel: null                      # Optional channel override (e.g., "#transcripts")

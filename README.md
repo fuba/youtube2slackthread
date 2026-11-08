@@ -8,6 +8,7 @@ Real-time YouTube transcription to Slack threads using Voice Activity Detection 
 - **🧵 Slack thread organization** - each video gets its own dedicated thread
 - **⚡ Slash command support** - use `/youtube2thread` in Slack
 - **🎤 Voice Activity Detection (VAD)** - natural sentence boundaries
+- **Translation and semantic endpoints (opt-in)** - paired source/translation, pause-based sentence decisions, and configurable ASR comparison; see [configuration and evaluation](docs/STREAM_TRANSLATION.md)
 - **🚀 CUDA acceleration** - GPU-powered Whisper transcription
 - **🔒 User-specific cookie management** - secure per-user authentication via DM
 - **🛡️ Encrypted storage** - AES-256 encryption for stored cookies
@@ -239,4 +240,5 @@ uv run youtube2slack serve --verbose
 
 ## License
 
-CC0 - Creative Commons Zero
+CC0 - Creative Commons Zero. New streaming translation contributions are licensed under
+[MIT](LICENSE-MIT), as indicated in their source files and documentation.

@@ -1,126 +1,115 @@
-"""VAD-based real-time stream processing module."""
+# SPDX-License-Identifier: MIT
+"""Pause-based streaming recognition with bounded, disjoint audio segments."""
 
+import logging
+import math
 import os
+import struct
+import subprocess
+import tempfile
 import threading
 import time
-import tempfile
-import subprocess
-import queue
 import wave
-import struct
-import re
-from pathlib import Path
-from typing import Dict, Optional, Any, Callable, List
-import logging
+from typing import Any, Dict, Optional
 
 try:
     import webrtcvad
     VAD_AVAILABLE = True
 except ImportError:
     VAD_AVAILABLE = False
-    logging.warning("webrtcvad not available, falling back to simple silence detection")
 
-from .whisper_transcriber import WhisperTranscriber, TranscriptionError
-
+from .speech_services import ServiceError
 
 logger = logging.getLogger(__name__)
 
 
 class VADStreamProcessingError(Exception):
-    """Exception raised for VAD stream processing failures."""
-    pass
+    """A stream failed; callers must not report successful completion."""
 
 
 class VADStreamProcessor:
-    """Process live YouTube streams with Voice Activity Detection."""
+    """Capture PCM and recognize after pauses, at the audio limit, or at EOF.
 
-    def __init__(self, transcriber: WhisperTranscriber,
-                 vad_aggressiveness: int = 2, frame_duration_ms: int = 30, 
-                 cookies_file: Optional[str] = None, user_id: Optional[str] = None):
-        """Initialize VAD stream processor.
-        
-        Args:
-            transcriber: WhisperTranscriber instance
-            vad_aggressiveness: VAD aggressiveness level (0-3, higher = more strict)
-            frame_duration_ms: Frame duration for VAD analysis (10, 20, or 30 ms)
-            cookies_file: Path to Netscape-format cookies file for YouTube authentication
-            user_id: Slack user ID for user-specific processing
-        """
+    Only the capture thread owns buffers and finalization. Stop requests interrupt
+    capture, leaving the owner to flush exactly once before cleaning up.
+    """
+
+    def __init__(self, transcriber, vad_aggressiveness=2, frame_duration_ms=30,
+                 cookies_file=None, user_id=None, translator=None, endpoint_detector=None,
+                 language=None, pause_duration=0.25, max_silence_duration=1.5,
+                 max_segment_duration=12.0, result_callback=None):
+        if frame_duration_ms not in (10, 20, 30):
+            raise ValueError('VAD frame duration must be 10, 20 or 30 ms')
+        durations = (pause_duration, max_silence_duration, max_segment_duration)
+        if not all(isinstance(value, (float, int)) and math.isfinite(value) for value in durations):
+            raise ValueError('Segment durations must be finite numbers')
+        if not 0 < pause_duration <= max_silence_duration < max_segment_duration <= 120:
+            raise ValueError('Require 0 < pause <= silence < maximum <= 120 seconds')
         self.transcriber = transcriber
         self.cookies_file = cookies_file
         self.user_id = user_id
-        self.vad_aggressiveness = vad_aggressiveness
+        self.translator = translator
+        self.endpoint_detector = endpoint_detector
+        self.language = language
+        self.pause_duration = pause_duration
+        self.max_silence_duration = max_silence_duration
+        self.max_segment_duration = max_segment_duration
         self.frame_duration_ms = frame_duration_ms
-        
-        # Initialize VAD
-        if VAD_AVAILABLE:
-            self.vad = webrtcvad.Vad(vad_aggressiveness)
-            logger.info(f"WebRTC VAD initialized with aggressiveness {vad_aggressiveness}")
-        else:
-            self.vad = None
-            logger.warning("Using simple silence detection instead of WebRTC VAD")
-        
+        self.vad = webrtcvad.Vad(vad_aggressiveness) if VAD_AVAILABLE else None
+        self.sample_rate = 16000
+        self.bytes_per_frame = self.sample_rate * frame_duration_ms // 1000 * 2
+        self.max_segment_bytes = int(max_segment_duration * 1000 // frame_duration_ms) * self.bytes_per_frame
+        if not self.max_segment_bytes:
+            raise ValueError('Maximum segment duration must allow at least one VAD frame')
+        self.temp_dir = tempfile.mkdtemp(prefix='youtube2slack_vad_')
+        self.progress_callback = None
+        self.result_callback = result_callback
         self.is_running = False
-        self.audio_queue = queue.Queue()
-        self.processing_thread = None
         self.stream_info = {}
-        
-        # Audio buffering for VAD processing
+        self._capture_process = None
+        self._finished = threading.Event()
+        self._finished.set()
+        self._owner = None
+        self._used = False
         self.audio_buffer = b''
         self.speech_buffer = b''
         self.is_speaking = False
         self.silence_duration = 0.0
-        self.min_speech_duration = 3.0  # Minimum speech duration in seconds  
-        self.max_silence_duration = 2.0  # Maximum silence before processing chunk
-        
-        # Text buffering for sentence detection
-        self.text_buffer = ""
-        self.sentence_endings = re.compile(r'[。！？\.\!\?]')
-        self.max_buffer_length = 80  # Maximum characters before forced posting
-        
-        # Audio settings
-        self.sample_rate = 16000
-        self.frame_size = int(self.sample_rate * self.frame_duration_ms / 1000)
-        self.bytes_per_frame = self.frame_size * 2  # 16-bit audio
-        
-        # Temporary directory for audio chunks
-        self.temp_dir = tempfile.mkdtemp(prefix="youtube2slack_vad_")
-        
-        logger.info(f"VAD stream processor initialized")
+        self._silence_samples = 0
+        self._pause_checked = False
+        self._cached_transcription = None
+        self._sample_position = 0
+        self._segment_start = 0
+        self.asr_requests = 0
+        self.asr_seconds = 0.0
+        self.endpoint_failures = 0
+        self.translation_failures = 0
+        self.forced_segments = 0
+        self.posted_segments = 0
+        self.last_result = None
+        self.text_buffer = ''
 
-    def start_stream_processing(self, stream_url: str, 
-                               progress_callback: Optional[Callable[[str], None]] = None) -> None:
-        """Start processing a live stream with VAD.
-        
-        Args:
-            stream_url: YouTube live stream URL
-            progress_callback: Optional callback for progress updates
-        """
-        if self.is_running:
-            raise VADStreamProcessingError("Stream processing already running")
-            
+    def start_stream_processing(self, stream_url, progress_callback=None):
+        if self._used:
+            raise VADStreamProcessingError('Create a new processor for each stream')
+        self._used = True
+        self.progress_callback = progress_callback
         self.is_running = True
-        self.progress_callback = progress_callback  # Store callback for _post_sentence_to_slack
-        self.stream_info = self._get_stream_info(stream_url)
-        
-        logger.info(f"Starting VAD-based processing of: {self.stream_info.get('title', 'Unknown Stream')}")
-        
-        # Stream processing started
-        
-        # Removed: Don't send initial setup messages to Slack
-        # if progress_callback:
-        #     progress_callback(f"Starting VAD stream: {self.stream_info.get('title', 'Unknown')}")
-        
-        # Start background thread for processing audio segments
-        self.processing_thread = threading.Thread(
-            target=self._process_audio_worker,
-            args=(progress_callback,),
-            daemon=True
-        )
-        self.processing_thread.start()
-        
-        # Start continuous audio streaming with VAD
-        self._start_vad_stream_capture(stream_url, progress_callback)
+        self._owner = threading.get_ident()
+        self._finished.clear()
+        try:
+            self.stream_info = self._get_stream_info(stream_url)
+            self._start_vad_stream_capture(stream_url, progress_callback)
+            if self.translation_failures or self.endpoint_failures:
+                raise VADStreamProcessingError(
+                    f'Inference failures: translation={self.translation_failures}, '
+                    f'endpoint={self.endpoint_failures}'
+                )
+        finally:
+            self.is_running = False
+            self._capture_process = None
+            self._cleanup_temp_dir()
+            self._finished.set()
 
     def _get_stream_info(self, stream_url: str) -> Dict[str, Any]:
         """Get stream information without downloading."""
@@ -151,43 +140,36 @@ class VADStreamProcessor:
             logger.error(f"Failed to get stream info: {e}")
             return {'title': 'Live Stream', 'url': stream_url}
 
-    def _start_vad_stream_capture(self, stream_url: str, 
-                                progress_callback: Optional[Callable[[str], None]] = None) -> None:
-        """Start continuous audio capture with VAD processing."""
-        # Get the actual stream URL
-        actual_stream_url = self._get_actual_stream_url(stream_url)
-        if not actual_stream_url:
-            raise VADStreamProcessingError("Could not get actual stream URL")
-        
-        try:
-            # Start FFmpeg process for continuous audio streaming
-            cmd = [
-                'ffmpeg',
-                '-i', actual_stream_url,
-                '-vn',  # No video
-                '-acodec', 'pcm_s16le',  # PCM 16-bit
-                '-ar', str(self.sample_rate),  # 16kHz sample rate
-                '-ac', '1',  # Mono
-                '-f', 'wav',  # WAV format
-                '-loglevel', 'error',
-                '-avoid_negative_ts', 'make_zero',
-                '-flush_packets', '1',
-                'pipe:1'  # Output to stdout
-            ]
-            
-            logger.info("Starting continuous FFmpeg audio stream...")
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            
-            # Removed: Don't send initial processing message to Slack
-            # if progress_callback:
-            #     progress_callback("Processing continuous audio stream with VAD...")
-            
-            # Read audio data continuously
-            self._process_continuous_audio_stream(process, progress_callback)
-            
-        except Exception as e:
-            logger.error(f"VAD stream capture failed: {e}")
-            raise VADStreamProcessingError(f"Stream capture failed: {e}")
+    def _start_vad_stream_capture(self, stream_url, progress_callback=None):
+        actual_url = self._get_actual_stream_url(stream_url)
+        if not actual_url:
+            raise VADStreamProcessingError('Could not get actual stream URL')
+        # Raw PCM avoids treating FFmpeg's variable-sized WAV header as speech.
+        cmd = ['ffmpeg', '-nostdin', '-i', actual_url, '-vn', '-acodec', 'pcm_s16le',
+               '-ar', str(self.sample_rate), '-ac', '1', '-f', 's16le',
+               '-loglevel', 'error', 'pipe:1']
+        # A file avoids stderr pipe deadlocks; its contents may include signed URLs.
+        with tempfile.TemporaryFile() as errors:
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errors)
+            self._capture_process = process
+            try:
+                self.process_pcm_stream(process.stdout)
+                if self.is_running:
+                    try:
+                        exit_code = process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        raise VADStreamProcessingError('FFmpeg did not finish after audio EOF') from None
+                    if exit_code != 0:
+                        raise VADStreamProcessingError('FFmpeg audio capture failed')
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+                process.stdout.close()
 
     def _get_actual_stream_url(self, youtube_url: str) -> Optional[str]:
         """Get the actual stream URL that ffmpeg can process."""
@@ -212,7 +194,7 @@ class VADStreamProcessor:
             
             if result.returncode == 0 and result.stdout.strip():
                 actual_url = result.stdout.strip().split('\n')[0]
-                logger.info(f"Got actual stream URL: {actual_url[:100]}...")
+                logger.info("Resolved stream URL")
                 return actual_url
             else:
                 error_message = result.stderr
@@ -262,84 +244,146 @@ class VADStreamProcessor:
                 return True
         return False
 
-    def _process_continuous_audio_stream(self, process: subprocess.Popen,
-                                       progress_callback: Optional[Callable[[str], None]] = None) -> None:
-        """Process continuous audio stream with VAD."""
-        chunk_count = 0
-        last_segment_time = time.time()
-        
+    def process_pcm_stream(self, stream):
+        """Consume 16 kHz mono PCM16, including short reads and the EOF remainder."""
         try:
-            while self.is_running and process.poll() is None:
-                # Read audio frame
-                audio_data = process.stdout.read(self.bytes_per_frame)
-                if not audio_data:
+            # Read to EOF even after the child exits: its pipe may still hold audio.
+            while self.is_running:
+                data = stream.read(self.bytes_per_frame)
+                if not data:
                     break
-                
-                # Force process long speech segments (timeout)
-                current_time = time.time()
-                if (self.is_speaking and 
-                    current_time - last_segment_time > 10 and  # 10 seconds timeout
-                    len(self.speech_buffer) >= int(self.sample_rate * 2 * 2)):  # At least 2 seconds
-                    
-                    logger.info("Forcing segment processing due to timeout")
-                    self._queue_speech_segment(chunk_count, progress_callback)
-                    chunk_count += 1
-                    last_segment_time = current_time
-                    
-                    # Reset for next segment
-                    self.speech_buffer = b''
-                    self.is_speaking = False
-                    self.silence_duration = 0.0
-                
-                # Accumulate audio buffer
-                self.audio_buffer += audio_data
-                
-                # Process when we have enough data for VAD
+                self.audio_buffer += data
                 while len(self.audio_buffer) >= self.bytes_per_frame:
                     frame = self.audio_buffer[:self.bytes_per_frame]
                     self.audio_buffer = self.audio_buffer[self.bytes_per_frame:]
-                    
-                    # Perform VAD analysis
-                    is_speech = self._is_speech(frame)
-                    
-                    if is_speech:
-                        if not self.is_speaking:
-                            logger.info("Speech detected, starting recording")
-                            self.is_speaking = True
-                        
-                        self.speech_buffer += frame
-                        self.silence_duration = 0.0
-                    else:
-                        if self.is_speaking:
-                            self.silence_duration += self.frame_duration_ms / 1000.0
-                            self.speech_buffer += frame  # Include some silence
-                            
-                            # Debug: Log silence accumulation
-                            if int(self.silence_duration) != int(self.silence_duration - self.frame_duration_ms / 1000.0):
-                                speech_duration = len(self.speech_buffer) / (self.sample_rate * 2)
-                                logger.debug(f"Silence: {self.silence_duration:.1f}s, Speech: {speech_duration:.1f}s")
-                            
-                            # If silence is long enough and we have enough speech, process it
-                            speech_duration = len(self.speech_buffer) / (self.sample_rate * 2)
-                            if (self.silence_duration >= self.max_silence_duration and 
-                                speech_duration >= self.min_speech_duration):
-                                
-                                logger.info(f"Processing speech segment: duration={speech_duration:.2f}s, "
-                                          f"silence={self.silence_duration:.2f}s")
-                                self._queue_speech_segment(chunk_count, progress_callback)
-                                chunk_count += 1
-                                last_segment_time = current_time
-                                
-                                # Reset for next segment
-                                self.speech_buffer = b''
-                                self.is_speaking = False
-                                self.silence_duration = 0.0
-                
-        except Exception as e:
-            logger.error(f"Audio stream processing failed: {e}")
+                    self._process_frame(frame)
+            if len(self.audio_buffer) % 2:
+                raise VADStreamProcessingError('Truncated PCM sample at input end')
+            if self.audio_buffer:
+                self._process_frame(self.audio_buffer)
+                self.audio_buffer = b''
+            self._finalize_segment('eof' if self.is_running else 'stop')
         finally:
-            if process.poll() is None:
-                process.terminate()
+            # A failure must not cause a later stop request to post the same audio again.
+            self.speech_buffer = b''
+            self.audio_buffer = b''
+            self.is_speaking = False
+
+    def _process_frame(self, frame):
+        samples = len(frame) // 2
+        position = self._sample_position
+        self._sample_position += samples
+        speech = self._is_speech(frame)
+        if speech:
+            if not self.speech_buffer:
+                self._segment_start = position
+            self.is_speaking = True
+            self._silence_samples = 0
+            self._pause_checked = False
+        elif not self.is_speaking:
+            return
+        else:
+            self._silence_samples += samples
+        self.silence_duration = self._silence_samples / self.sample_rate
+        self.speech_buffer += frame
+
+        # Bound duration using samples, independent of input speed or ASR waiting time.
+        if len(self.speech_buffer) >= self.max_segment_bytes:
+            self._finalize_segment('maximum')
+        elif self.silence_duration >= self.max_silence_duration:
+            self._finalize_segment('silence')
+        elif (self.endpoint_detector and not self._pause_checked and
+              self.silence_duration >= self.pause_duration):
+            self._pause_checked = True
+            result = self._recognize()
+            if result['text']:
+                try:
+                    if self.endpoint_detector.is_complete(result['text'], result.get('language')):
+                        self._finalize_segment('semantic')
+                except ServiceError as error:
+                    self.endpoint_failures += 1
+                    logger.warning('Endpoint detection failed: %s', error)
+                    # Keep collecting audio until long silence or the independent maximum.
+
+    def _recognize(self):
+        if self._cached_transcription and self._cached_transcription[0] == self.speech_buffer:
+            return self._cached_transcription[1]
+        path = os.path.join(self.temp_dir, 'segment.wav')
+        try:
+            with wave.open(path, 'wb') as audio:
+                audio.setnchannels(1)
+                audio.setsampwidth(2)
+                audio.setframerate(self.sample_rate)
+                audio.writeframes(self.speech_buffer)
+            started = time.monotonic()
+            self.asr_requests += 1
+            try:
+                result = self.transcriber.transcribe(path, language=self.language)
+            finally:
+                self.asr_seconds += time.monotonic() - started
+            if not isinstance(result, dict) or not isinstance(result.get('text'), str):
+                raise VADStreamProcessingError('Invalid ASR response')
+            self._cached_transcription = (self.speech_buffer, result)
+            return result
+        except VADStreamProcessingError:
+            raise
+        except Exception:
+            raise VADStreamProcessingError('ASR request failed') from None
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+
+    def _finalize_segment(self, reason):
+        if not self.speech_buffer:
+            return
+        result = self._recognize()
+        start = self._segment_start / self.sample_rate
+        end = (self._segment_start + len(self.speech_buffer) // 2) / self.sample_rate
+        # Consume before callbacks: ambiguous delivery must not trigger automatic replay.
+        self.speech_buffer = b''
+        self.is_speaking = False
+        self._silence_samples = 0
+        self.silence_duration = 0.0
+        self._pause_checked = False
+        self._cached_transcription = None
+        if reason == 'maximum':
+            self.forced_segments += 1
+        source = result['text'].strip()
+        if not source:
+            return
+        self._post_result(source, result.get('language') or self.language, reason, start, end)
+
+    def _post_result(self, source, language, reason, start, end):
+        record = dict(id=self.posted_segments + 1, source=source, source_language=language,
+                      start=start, end=end, boundary=reason, translation=None, error=None)
+        message = source
+        if self.translator:
+            record['target_language'] = self.translator.target_language
+            try:
+                record['translation'] = self.translator.translate(source, language)
+                message = (f"[{record['id']}] Original ({language or 'auto'}): {source}\n"
+                           f"Translation ({self.translator.target_language}): {record['translation']}")
+            except ServiceError as error:
+                self.translation_failures += 1
+                record['error'] = str(error)
+                message = (f"[{record['id']}] Original ({language or 'auto'}): {source}\n"
+                           f"Translation error ({self.translator.target_language}): {error}")
+        self.last_result = record
+        if self.result_callback:
+            self.result_callback(record)
+        if self.progress_callback:
+            self.progress_callback(message)
+        self.posted_segments += 1
+
+    def stop_processing(self):
+        """Request stop; the capture owner drains its buffers before cleanup."""
+        self.is_running = False
+        process = self._capture_process
+        if process and process.poll() is None:
+            process.terminate()
+        if self._owner and self._owner != threading.get_ident():
+            if not self._finished.wait(timeout=10):
+                raise VADStreamProcessingError('Stream is still finishing its pending inference')
 
     def _is_speech(self, audio_frame: bytes) -> bool:
         """Determine if audio frame contains speech using VAD."""
@@ -364,164 +408,6 @@ class VADStreamProcessor:
         # Lower threshold for voice detection (more sensitive)
         return rms > 200  # More sensitive threshold
 
-    def _queue_speech_segment(self, segment_index: int,
-                            progress_callback: Optional[Callable[[str], None]] = None) -> None:
-        """Queue a speech segment for transcription."""
-        if len(self.speech_buffer) < int(self.sample_rate * 0.5 * 2):  # Less than 0.5 seconds
-            return
-            
-        # Save audio segment to file
-        segment_path = os.path.join(self.temp_dir, f"speech_{segment_index:04d}.wav")
-        
-        try:
-            with wave.open(segment_path, 'wb') as wav_file:
-                wav_file.setnchannels(1)  # Mono
-                wav_file.setsampwidth(2)  # 16-bit
-                wav_file.setframerate(self.sample_rate)
-                wav_file.writeframes(self.speech_buffer)
-            
-            # Add to processing queue
-            segment_info = {
-                'path': segment_path,
-                'index': segment_index,
-                'timestamp': time.time(),
-                'duration': len(self.speech_buffer) / (self.sample_rate * 2)
-            }
-            
-            self.audio_queue.put(segment_info)
-            logger.info(f"Queued speech segment {segment_index} "
-                       f"(duration: {segment_info['duration']:.2f}s)")
-            
-            # Removed: Don't send processing progress to Slack
-            # if progress_callback:
-            #     progress_callback(f"Processing speech segment {segment_index + 1}")
-                
-        except Exception as e:
-            logger.error(f"Failed to save speech segment: {e}")
-
-    def _process_audio_worker(self, progress_callback: Optional[Callable[[str], None]] = None) -> None:
-        """Background worker to process audio segments."""
-        processed_segments = 0
-        
-        while self.is_running or not self.audio_queue.empty():
-            try:
-                # Get segment from queue
-                segment_info = self.audio_queue.get(timeout=5)
-                logger.info(f"Got audio segment {segment_info['index']} from queue")
-                
-                # Transcribe segment
-                transcription = self._transcribe_segment(segment_info)
-                
-                if transcription and transcription['text'].strip():
-                    logger.info(f"Transcription result: {transcription['text'][:100]}...")
-                    # Add to text buffer and process sentences
-                    self._process_transcription(transcription['text'].strip())
-                    processed_segments += 1
-                else:
-                    logger.warning(f"Empty or failed transcription for segment {segment_info['index']}")
-                
-                # Cleanup segment file
-                self._cleanup_segment(segment_info['path'])
-                self.audio_queue.task_done()
-                
-            except queue.Empty:
-                logger.debug("No audio segments in queue, waiting...")
-                continue
-            except Exception as e:
-                logger.error(f"Audio processing failed: {e}")
-                continue
-
-    def _transcribe_segment(self, segment_info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Transcribe a single audio segment."""
-        try:
-            result = self.transcriber.transcribe(segment_info['path'])
-            return result
-            
-        except (TranscriptionError, Exception) as e:
-            logger.error(f"Failed to transcribe segment {segment_info['index']}: {e}")
-            return None
-
-    def _process_transcription(self, text: str) -> None:
-        """Process transcription text and detect sentence boundaries."""
-        logger.info(f"Processing transcription: {text[:100]}...")
-        self.text_buffer += text + " "  # Add space between segments
-        logger.info(f"Current buffer length: {len(self.text_buffer)} chars")
-        
-        # Find complete sentences using regex search
-        while True:
-            match = self.sentence_endings.search(self.text_buffer)
-            if not match:
-                break
-                
-            # Extract sentence up to the ending
-            sentence_end = match.end()
-            sentence = self.text_buffer[:sentence_end].strip()
-            
-            # Remove the processed sentence from buffer
-            self.text_buffer = self.text_buffer[sentence_end:].strip()
-            
-            # Post if sentence is substantial
-            if sentence and len(sentence) > 5:
-                logger.info(f"Found complete sentence: {sentence}")
-                self._post_sentence_to_slack(sentence)
-        
-        # If buffer gets too long without sentence endings, force post
-        if len(self.text_buffer) > self.max_buffer_length:
-            # Try to break at natural points (like "という" "ですが" etc.)
-            break_points = ['という', 'ですが', 'ましたが', 'ますが', 'になります', 'ということで']
-            best_break = -1
-            
-            for point in break_points:
-                pos = self.text_buffer.rfind(point)
-                if pos > 50:  # Don't break too early
-                    best_break = max(best_break, pos + len(point))
-            
-            if best_break > 0:
-                # Break at natural point
-                sentence = self.text_buffer[:best_break].strip()
-                self.text_buffer = self.text_buffer[best_break:].strip()
-                logger.info(f"Natural break at: {sentence[-20:]}...")
-                self._post_sentence_to_slack(sentence)
-            else:
-                # Force break at character limit
-                logger.info(f"Buffer too long, forcing post: {self.text_buffer[:50]}...")
-                self._post_sentence_to_slack(self.text_buffer.strip())
-                self.text_buffer = ""
-
-    def _post_sentence_to_slack(self, sentence: str) -> None:
-        """Post a complete sentence via callback."""
-        # Use progress callback
-        if hasattr(self, 'progress_callback') and self.progress_callback:
-            logger.info(f"Posting sentence via callback: {sentence[:50]}...")
-            self.progress_callback(sentence)
-
-    def _cleanup_segment(self, segment_path: str) -> None:
-        """Clean up processed segment file."""
-        try:
-            if os.path.exists(segment_path):
-                os.remove(segment_path)
-        except Exception as e:
-            logger.warning(f"Failed to cleanup segment {segment_path}: {e}")
-
-    def stop_processing(self) -> None:
-        """Stop stream processing."""
-        if self.is_running:
-            logger.info("Stopping VAD stream processing...")
-            self.is_running = False
-            
-            # Process any remaining text in buffer
-            if self.text_buffer.strip():
-                self._post_sentence_to_slack(self.text_buffer.strip())
-            
-            # Wait for processing thread to finish
-            if self.processing_thread and self.processing_thread.is_alive():
-                self.processing_thread.join(timeout=10)
-            
-            # Cleanup temporary directory
-            self._cleanup_temp_dir()
-            
-            logger.info("VAD stream processing stopped")
-
     def _cleanup_temp_dir(self) -> None:
         """Clean up temporary directory and all segment files."""
         try:
@@ -532,14 +418,12 @@ class VADStreamProcessor:
         except Exception as e:
             logger.warning(f"Failed to cleanup temp directory: {e}")
 
-    def get_status(self) -> Dict[str, Any]:
-        """Get current processing status."""
-        return {
-            'is_running': self.is_running,
-            'stream_info': self.stream_info,
-            'pending_segments': self.audio_queue.qsize(),
-            'vad_available': VAD_AVAILABLE,
-            'is_speaking': self.is_speaking,
-            'text_buffer_length': len(self.text_buffer),
-            'temp_dir': self.temp_dir
-        }
+    def get_status(self):
+        return dict(is_running=self.is_running, stream_info=self.stream_info,
+                    pending_segments=0, vad_available=VAD_AVAILABLE,
+                    is_speaking=self.is_speaking, text_buffer_length=0,
+                    temp_dir=self.temp_dir, asr_requests=self.asr_requests,
+                    asr_seconds=self.asr_seconds, endpoint_failures=self.endpoint_failures,
+                    translation_failures=self.translation_failures,
+                    forced_segments=self.forced_segments, posted_segments=self.posted_segments,
+                    last_result=self.last_result)
