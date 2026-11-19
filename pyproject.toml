@@ -39,11 +39,26 @@ dev = [
     "black>=23.11.0",
     "flake8>=6.1.0",
     "mypy>=1.7.1",
-    "pre-commit>=3.5.0",
+    "pre-commit>=3.5.0; python_version >= '3.11'",
 ]
+
+[dependency-groups]
+pre-commit = ["pre-commit>=3.5.0"]
 
 [project.scripts]
 youtube2slack = "youtube2slack.cli:main"
+
+[tool.uv]
+exclude-newer = "P7D"
+constraint-dependencies = [
+    # Python 3.10 cannot use filelock 4.2.1, and 3.20.4 introduced CVE-2026-112940.
+    "filelock==3.20.3; python_version < '3.11'",
+    "filelock>=4.2.1; python_version >= '3.11'",
+    "virtualenv>=21.14.9",
+]
+
+[tool.uv.dependency-groups]
+pre-commit = { requires-python = ">=3.11" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
