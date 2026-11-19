@@ -231,10 +231,17 @@ whisper:
 
 ```bash
 # Install with development dependencies
-uv pip install -e ".[dev]"
+uv sync --locked --extra dev
 
 # Run with debug logging
 uv run youtube2slack serve --verbose
+```
+
+When developing with Python 3.10, run pre-commit in an isolated Python 3.11
+environment using the same lockfile:
+
+```bash
+uv run --locked --isolated --python 3.11 --only-group pre-commit pre-commit --version
 ```
 
 ## License
